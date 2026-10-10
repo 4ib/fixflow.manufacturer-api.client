@@ -1,5 +1,7 @@
 # FixFlow Manufacturer API — demo client
 
+![The demo client: a form that creates a work order, next to the tracked work orders updated from the change feed](docs/screenshot.png)
+
 A small reference client for the **FixFlow Manufacturer API v1**. Your system uses this API to send repair
 work orders to FixFlow and to track their status by polling.
 
