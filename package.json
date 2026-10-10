@@ -2,6 +2,7 @@
   "name": "fixflow-manufacturer-api-client",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Reference client for the FixFlow Manufacturer API v1: create repair work orders and track their status by polling the change feed.",
   "type": "module",
   "engines": {

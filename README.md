@@ -114,3 +114,7 @@ Settings (all optional) are listed in [`.env.example`](.env.example).
 - **The mock is a simplification.** It follows the documented behaviour of v1, but the real API
   matches the customer, service location and unit more thoroughly. The public API page describes
   those rules.
+
+## License
+
+[MIT](LICENSE).
