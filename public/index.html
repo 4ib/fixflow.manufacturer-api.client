@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FixFlow Manufacturer API — demo client</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <h1>FixFlow Manufacturer API <span class="muted">demo client</span></h1>
+        <p class="muted" id="connection">Connecting…</p>
+      </div>
+      <span class="badge" id="mode-badge">…</span>
+    </header>
+
+    <main class="grid">
+      <section class="card" aria-labelledby="create-title">
+        <h2 id="create-title">Create a work order</h2>
+        <p class="hint">
+          <code>POST /manufacturer-api/v1/work-orders</code>. Sending the same
+          <em>Your reference</em> again returns the same work order (<code>200</code>, replayed).
+        </p>
+        <form id="create-form" novalidate>
+          <fieldset>
+            <legend>Your claim</legend>
+            <label>Your reference (externalReference) *
+              <span class="row">
+                <input name="externalReference" required />
+                <button type="button" class="secondary" id="new-reference">New</button>
+              </span>
+            </label>
+            <label>Problem description *<textarea name="description" rows="2" required></textarea></label>
+            <div class="cols">
+              <label>Urgency
+                <select name="urgency">
+                  <option>Normal</option>
+                  <option>Low</option>
+                  <option>Emergency</option>
+                </select>
+              </label>
+              <label>Deadline<input name="deadline" type="date" /></label>
+            </div>
+            <div class="cols">
+              <label class="check"><input name="isWarranty" type="checkbox" checked /> Warranty claim</label>
+              <label>Warranty reference<input name="warrantyReference" /></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>End customer</legend>
+            <div class="cols">
+              <label>Name *<input name="customer.name" required /></label>
+              <label>Your customer id<input name="customer.reference" /></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Service location</legend>
+            <label>Address line 1 *<input name="serviceLocation.addressLine1" required /></label>
+            <div class="cols three">
+              <label>City *<input name="serviceLocation.city" required /></label>
+              <label>State *<input name="serviceLocation.state" required /></label>
+              <label>ZIP *<input name="serviceLocation.zip" required /></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Unit</legend>
+            <div class="cols">
+              <label>Model number *<input name="equipment.modelNumber" required /></label>
+              <label>Serial number<input name="equipment.serialNumber" /></label>
+            </div>
+          </fieldset>
+          <div class="actions">
+            <button type="submit">Create work order</button>
+          </div>
+          <div id="create-result" class="result" hidden></div>
+        </form>
+      </section>
+
+      <section class="card wide" aria-labelledby="tracked-title">
+        <div class="card-head">
+          <h2 id="tracked-title">Tracked work orders</h2>
+          <button type="button" class="secondary" id="poll-now">Poll now</button>
+        </div>
+        <p class="hint">
+          Created here or seen in <code>GET /manufacturer-api/v1/work-orders/changes</code>. A background
+          loop polls the feed, applies each snapshot by id, then stores <code>nextCursor</code>.
+        </p>
+        <p class="feed" id="feed-state"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Number</th>
+                <th>Your reference</th>
+                <th>Status</th>
+                <th>Customer</th>
+                <th>Unit</th>
+                <th>Scheduled</th>
+                <th>Changed</th>
+              </tr>
+            </thead>
+            <tbody id="tracked-rows">
+              <tr><td colspan="7" class="muted">No work orders yet — create one.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="lookup-title">
+        <h2 id="lookup-title">Look up a work order</h2>
+        <p class="hint">
+          <code>GET …/work-orders/{id}</code> or <code>GET …/work-orders/by-reference/{externalReference}</code>.
+        </p>
+        <form id="lookup-form" class="row">
+          <input name="query" placeholder="FixFlow id (e.g. 10001) or your reference" />
+          <button type="submit" class="secondary">Look up</button>
+        </form>
+        <pre id="lookup-result" class="json" hidden></pre>
+      </section>
+    </main>
+
+    <footer class="muted">
+      The API key stays on this demo's server — the browser only talks to <code>/api/*</code> of the demo.
+    </footer>
+  </body>
+</html>
