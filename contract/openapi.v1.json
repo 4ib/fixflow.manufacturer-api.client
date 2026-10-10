@@ -1,0 +1,1788 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "FixFlow Manufacturer API",
+    "description": "The **FixFlow Manufacturer API** is the machine surface of a manufacturer\u0027s own systems\n(warranty desk, CRM, reporting). It is authenticated by an API key, versioned in the path, and\ndocumented by this single artefact: the document you are reading **is** the contract.\n\nThis is release **1.0.0**, the first released version of \u0060v1\u0060. The endpoints listed below are its\nwhole surface; later releases only add to it and record every change in the\n[Changelog](#changelog).\n\n## Base URL\n\nEvery path in this document is relative to the API base of your FixFlow deployment:\n\n\u0060\u0060\u0060\nhttps://\u003Cyour-fixflow-host\u003E/fixflow\n\u0060\u0060\u0060\n\nSo the verify-key call below is \u0060GET https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/key\u0060.\nYour FixFlow contact gives you the host; the \u0060/fixflow\u0060 segment is part of the base and does not\nchange.\n\n## Getting a key\n\nUse one key per integrating system, never one per person. There are two ways to get one:\n\n- **Self-service**: sign in to the FixFlow manufacturer portal and open **API keys**. Any active\n  user of your company can create and revoke your company\u0027s keys there.\n- **Through FixFlow staff**: ask your FixFlow contact, naming the system that will use the key\n  (for example \u0060Warranty desk\u0060).\n\nEither way:\n\n1. The full key value is shown **once**, at creation time, and is never retrievable again. Store it\n   in your secret manager immediately.\n2. Call \u0060GET /manufacturer-api/v1/key\u0060 to confirm the key works and to see which manufacturer it is\n   bound to.\n\nA key can be revoked at any time; a revoked key is rejected from the next request on. To rotate,\ncreate a new key, deploy it, then revoke the old one. Several keys can be active at once, so\nrotation needs no downtime.\n\n## Authentication\n\nSend the key in the \u0060X-Api-Key\u0060 request header on **every** call:\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/key HTTP/1.1\nHost: \u003Cyour-fixflow-host\u003E\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\nRules that will not change within \u0060v1\u0060:\n\n- \u0060X-Api-Key\u0060 is the only accepted credential. A bearer token (JWT) from the FixFlow web portals is\n  **not** accepted here, and a Manufacturer API key is **not** accepted outside\n  \u0060/manufacturer-api/v1/*\u0060.\n- The manufacturer is taken from the key alone. There is no \u0060manufacturerId\u0060 parameter to pass, and\n  no way to read another manufacturer\u0027s data with your key \u2014 rows that are not yours do not exist\n  for the API.\n- Always use HTTPS. A key sent over plain HTTP must be treated as leaked and revoked.\n\n## Demo client\n\nA small MIT-licensed reference client (Node.js, TypeScript) shows the whole integration end to end:\n\n- verifying the key;\n- creating work orders with safe retries;\n- the polling loop over the change feed with a stored cursor;\n- handling \u0060429\u0060.\n\nIt runs against a built-in mock of this API, so you can try it before you have a key. Once you\ngive it your base URL and a key, it works against your FixFlow deployment. The key stays on the\nclient\u0027s server and never reaches a browser.\n\n**Repository:** coming soon. The public link will be published here.\n\n## Creating a work order\n\n\u0060POST /manufacturer-api/v1/work-orders\u0060 submits a repair request for one of your units at an end\ncustomer\u0027s site. You do not need to know any FixFlow identifier: send the customer, the service\naddress and the unit, and FixFlow matches them against its own directories or creates the missing\nrows. The work order opens in status \u0060New\u0060 and a dispatcher takes it from there; you do not choose\nthe service company.\n\nThe response is the **work-order resource** \u2014 the same shape every read returns.\n\n### Idempotency\n\n\u0060externalReference\u0060 is your own claim or case number and is **required**. It is the idempotency key,\nunique per manufacturer:\n\n- the first call with a given value creates the work order and answers \u0060201 Created\u0060 with a\n  \u0060Location\u0060 header;\n- every later call with the same value answers \u0060200 OK\u0060 with that **same, unchanged** work order and\n  the response header \u0060Idempotent-Replayed: true\u0060;\n- two calls that race each other still produce exactly one work order.\n\nSo retrying a request that timed out is always safe, and you never need a \u0022did it get through?\u0022\nlookup before retrying. The replay never changes anything: send corrected data under a **new**\n\u0060externalReference\u0060, or ask the dispatcher.\n\n### How the customer is matched\n\nThe customer of the work order is the **end customer** whose unit is broken \u2014 not you.\n\n1. If you send \u0060customer.reference\u0060 (the customer\u0027s id in your system) and we have already seen it,\n   that customer is used \u2014 even if the name or address in this request differs. The stored customer\n   is never overwritten from a request.\n2. Otherwise we look for a customer with the same name **and** a site at the same\n   \u0060addressLine1\u0060 \u002B ZIP. Name alone is never enough: two unrelated companies may share a name.\n3. Otherwise a new customer is created.\n\nIn cases 2 and 3 a \u0060customer.reference\u0060 you sent is remembered and points at that customer from then\non. Sending \u0060customer.reference\u0060 consistently is the only way to guarantee one customer record.\n\n### How the service location is matched\n\nAmong that customer\u0027s sites we look for the same \u0060addressLine1\u0060 \u002B ZIP, otherwise we create the site\n(named \u0060serviceLocation.name\u0060, or the street line if you omit it). ZIP matching uses the first five\ndigits, so \u006008608\u0060 and \u006008608-1234\u0060 are the same place. Comparisons ignore letter case and extra\nspaces.\n\n### How the unit is matched\n\nThe unit always belongs to the manufacturer your key is bound to. Matching only ever looks at your\nown units at that site \u2014 equipment of another brand is never matched and never modified, even if it\ncarries the same serial number or model.\n\n- With \u0060equipment.serialNumber\u0060 we match on the serial number.\n- Without it we match on \u0060equipment.modelNumber\u0060, but only if there is exactly one such unit at the\n  site. Several identical models, or none, means there is nothing to match safely.\n- Otherwise a new unit is created under your brand.\n\n\u0060equipment.modelNumber\u0060 is required. If it is in your model catalogue in FixFlow the unit is linked\nto that model; an unknown model number is kept as free text, so nothing is rejected over it.\n\n### Validation\n\nA body that fails validation answers \u0060422\u0060 with \u0060errors\u0060 keyed by the JSON path of the field, for\nexample \u0060customer.name\u0060 or \u0060serviceLocation.zip\u0060. All problems are reported at once. Unknown fields\nin the body are ignored.\n\n## Tracking status\n\nThere are no webhooks in \u0060v1\u0060. You poll, and we make polling cheap: the **change feed** tells you\nwhich of your work orders moved, so you never re-read the ones that did not.\n\nThe three reads all return the same work-order resource, and all of them see the same scope \u2014 every\nwork order whose unit is one of your brand\u0027s, not only the ones you created through this API,\n**including archived ones** (they come back with \u0060archivedAt\u0060 set, so archiving reads as a state and\nnot as a disappearance):\n\n| Call | Use it for |\n| --- | --- |\n| \u0060GET /manufacturer-api/v1/work-orders/changes\u0060 | The normal loop: what changed since last time |\n| \u0060GET /manufacturer-api/v1/work-orders?ids=\u2026\u0026references=\u2026\u0060 | Resync: re-read up to 100 at once |\n| \u0060GET /manufacturer-api/v1/work-orders/{id}\u0060 and \u0060/by-reference/{externalReference}\u0060 | One work order, on demand |\n\n### The polling loop\n\n1. **Subscribe.** Call \u0060changes\u0060 once with no parameters. You get \u0060items: []\u0060 and a \u0060nextCursor\u0060\n   that means \u0022from now on\u0022. Store that cursor where it survives a restart.\n2. **Poll.** Every **30\u201360 seconds** call \u0060changes?cursor=\u003Cstored cursor\u003E\u0060. Apply the \u0060items\u0060, then\n   store the new \u0060nextCursor\u0060 \u2014 ideally in the same transaction, so a crash cannot lose it.\n3. **Drain.** While the answer says \u0060hasMore: true\u0060, more changes are already waiting: call again\n   right away with the cursor you just stored instead of waiting for the next tick.\n4. **Resync** if you ever lose the cursor or suspect your copy is stale: read the work orders you\n   care about with the batch call, then subscribe again.\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/work-orders/changes?cursor=djE6ODgxNDI\u0026limit=100 HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [\n    { \u0022id\u0022: 10427, \u0022status\u0022: \u0022Done\u0022, \u0022changedAt\u0022: \u00222026-10-13T15:48:02Z\u0022 }\n  ],\n  \u0022nextCursor\u0022: \u0022djE6ODgxNTA\u0022,\n  \u0022hasMore\u0022: false\n}\n\u0060\u0060\u0060\n\n(\u0060items\u0060 entries are full work-order resources; the one above is abridged.)\n\n### Rules of the feed\n\n- **Items are snapshots, not events.** Each item is the work order exactly as it is now, plus\n  \u0060changedAt\u0060 \u2014 when we last saw it change. Several changes to one work order inside one page\n  collapse into a single item, and the feed never tells you which field moved.\n- **Delivery is at-least-once, so be idempotent.** The same snapshot can arrive twice \u2014 after a\n  retry, or simply because you reused a cursor. Apply items by \u0060id\u0060 (upsert), never by counting\n  them.\n- **The cursor is opaque.** Store the string verbatim; do not parse it, order it or build one\n  yourself. An invalid cursor answers \u0060422\u0060, and the fix is a resync, not a retry.\n- **A moved cursor with an empty page is normal.** Changes to work orders outside your scope move\n  the cursor without being shown.\n- **The feed lags a few seconds behind live** by design, so that a change committed slightly out of\n  order is never skipped. Status changes therefore reach you a few seconds after they happen.\n- \u0060limit\u0060 is 1\u2013500, 100 by default. \u0060since=\u003CISO-8601 instant\u003E\u0060 starts from a moment instead of\n  subscribing from now; \u0060cursor\u0060 wins when you send both.\n\nChanges to any of these resource fields put a work order on the feed: \u0060status\u0060 (and with it the\nstage timestamps and \u0060completedAt\u0060), \u0060urgency\u0060, \u0060description\u0060, \u0060deadline\u0060, \u0060isWarranty\u0060,\n\u0060warrantyNumber\u0060, \u0060scheduledServiceAt\u0060, the unit, and \u0060archivedAt\u0060.\n\nA work order that leaves your scope \u2014 a dispatcher relinks the unit to another brand \u2014 stops being\nreadable (\u0060404\u0060 / \u0060notFound\u0060) and does **not** produce a feed item.\n\n### Reading a batch\n\n\u0060ids\u0060 and \u0060references\u0060 take comma-separated lists and may be mixed, up to **100 identifiers in\ntotal**; more answers \u0060422\u0060. Unknown identifiers, another manufacturer\u0027s, and work orders no longer\nin your scope all come back under \u0060notFound\u0060, echoed exactly as you sent them \u2014 one bad identifier\nnever fails the whole call.\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [],\n  \u0022notFound\u0022: { \u0022ids\u0022: [99999], \u0022references\u0022: [\u0022CLM-UNKNOWN\u0022] }\n}\n\u0060\u0060\u0060\n\n## Errors\n\nEvery error response is a [\u0060ProblemDetails\u0060](https://www.rfc-editor.org/rfc/rfc9457) body with the\ncontent type \u0060application/problem\u002Bjson\u0060:\n\n\u0060\u0060\u0060json\n{\n  \u0022title\u0022: \u0022Unauthorized\u0022,\n  \u0022detail\u0022: \u0022A valid API key is required.\u0022,\n  \u0022status\u0022: 401\n}\n\u0060\u0060\u0060\n\n| Status | When | What to do |\n| --- | --- | --- |\n| \u0060401 Unauthorized\u0060 | The \u0060X-Api-Key\u0060 header is missing, empty, unknown or revoked \u2014 or a JWT was sent instead of a key. | Fix the credential. Do not retry with the same key. |\n| \u0060404 Not Found\u0060 | The addressed resource does not exist **or** belongs to another manufacturer \u2014 the two cases are deliberately indistinguishable. | Check the identifier; do not treat it as \u0022exists but forbidden\u0022. |\n| \u0060422 Unprocessable Entity\u0060 | The request body or query failed validation. \u0060errors\u0060 carries the per-field messages. | Fix the payload; retrying unchanged will fail again. |\n| \u0060429 Too Many Requests\u0060 | The per-key rate limit is exhausted. | Wait \u0060Retry-After\u0060 seconds, then retry. |\n| \u0060400 Bad Request\u0060 | The request could not be parsed or bound at all (malformed JSON, wrong parameter type). | Fix the request. |\n| \u0060409 Conflict\u0060 | A write collided with the current state of the data. | Re-read the resource and decide. |\n\n\u00605xx\u0060 responses are our fault. They are safe to retry with backoff for idempotent requests\n(\u0060GET\u0060); report them if they persist.\n\n## Rate limits\n\nRequests are counted **per key** in a one-minute sliding window; the default allowance is **120\nrequests per minute**. Over the limit the API answers \u0060429\u0060 with a \u0060Retry-After\u0060 header in seconds\nand no side effects. The limit protects the shared service, so poll on a schedule rather than in a\ntight loop, and keep one key per system so one noisy job cannot starve another.\n\n## Versioning policy\n\nThe major version lives in the path (\u0060/manufacturer-api/v1/...\u0060) and \u0060info.version\u0060 carries the\npublished document version.\n\nWithin \u0060v1\u0060 we only make **additive** changes, and your client must tolerate them:\n\n- new endpoints, new optional request fields, new response fields;\n- new values in an existing enumeration;\n- new \u00604xx\u0060 reasons for input we already rejected.\n\nA **breaking** change \u2014 removing or renaming a path, operation, parameter or response field,\nnarrowing a type, dropping an enumeration value, or making an existing input required \u2014 is never\nshipped inside \u0060v1\u0060. It goes to \u0060/manufacturer-api/v2\u0060, which is announced before it is released and\nruns alongside \u0060v1\u0060.\n\nThis is enforced on our side, not promised in prose: release \u00601.0.0\u0060 of this document is frozen as a\ncompatibility baseline, and our build compares every later document against it. A change that\nremoves or narrows anything, or makes an input required, fails the build before it can be released.\n\nPractical client rules: ignore unknown response fields, treat unknown enumeration values as\n\u0022unmapped\u0022 instead of failing, and never depend on property order or on the exact wording of\n\u0060title\u0060/\u0060detail\u0060.\n\n## Changelog\n\n### 1.0.0 \u2014 2026-10-10 \u2014 initial release\n\nThe first released version of the contract, and the compatibility baseline of \u0060v1\u0060:\n\n- \u0060GET /manufacturer-api/v1/key\u0060 \u2014 verify a key and read the manufacturer it is bound to.\n- \u0060POST /manufacturer-api/v1/work-orders\u0060 \u2014 create a work order; idempotent on \u0060externalReference\u0060\n  (\u0060200\u0060 \u002B \u0060Idempotent-Replayed: true\u0060 on a repeat).\n- \u0060GET /manufacturer-api/v1/work-orders/{id}\u0060 and\n  \u0060GET /manufacturer-api/v1/work-orders/by-reference/{externalReference}\u0060 \u2014 read one work order;\n  unknown, another manufacturer\u0027s and out-of-scope all answer \u0060404\u0060.\n- \u0060GET /manufacturer-api/v1/work-orders?ids=\u2026\u0026references=\u2026\u0060 \u2014 read up to 100 at once \u2192\n  \u0060{ items, notFound }\u0060.\n- \u0060GET /manufacturer-api/v1/work-orders/changes\u0060 \u2014 the change feed with an opaque cursor \u2192\n  \u0060{ items, nextCursor, hasMore }\u0060; see [Tracking status](#tracking-status).\n- Reads see archived work orders too (\u0060archivedAt\u0060 is set on them).\n- \u0060X-Api-Key\u0060 authentication, \u0060ProblemDetails\u0060 errors, per-key rate limit.\n\nThe \u00601.0.0-preview\u0060, \u00601.1.0-preview\u0060 and \u00601.2.0-preview\u0060 documents published while the API was being\nbuilt are superseded by this release. Nothing that was in them was removed or narrowed.\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/manufacturer-api/v1/key": {
+      "get": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "Verify an API key",
+        "description": "Returns the manufacturer the key is bound to plus the key\u0027s own metadata, so an integration can check its credential on start-up. The manufacturer is taken from the key: there is nothing to pass and no way to ask about another manufacturer.",
+        "operationId": "verifyApiKey",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiKeyInfo"
+                },
+                "example": {
+                  "manufacturer": {
+                    "id": 42,
+                    "name": "Acme Industries"
+                  },
+                  "key": {
+                    "name": "Warranty desk",
+                    "prefix": "ffmfr_7Qa1",
+                    "createdAt": "2026-10-01T09:15:00Z",
+                    "lastUsedAt": "2026-10-09T07:42:11Z"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Unauthorized",
+                  "detail": "A valid API key is required.",
+                  "status": 401
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Too many requests",
+                  "detail": "The API key has exceeded its request limit. Please retry later.",
+                  "status": 429
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/key\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/work-orders": {
+      "post": {
+        "tags": [
+          "Work orders"
+        ],
+        "summary": "Create a work order",
+        "description": "Submits a repair request for one of your units at an end customer\u0027s site. FixFlow matches or creates the customer, the service location and the unit itself, then opens the work order in status \u0060New\u0060 for a dispatcher to triage.\n\n\u0060externalReference\u0060 \u2014 your own claim or case number \u2014 is the idempotency key: the first call creates the work order (\u0060201\u0060), every later call with the same value returns that same work order unchanged (\u0060200\u0060 with the \u0060Idempotent-Replayed: true\u0060 header). Retrying a timed-out request is therefore always safe.\n\nThe unit always belongs to the manufacturer the key is bound to, so the work order shows up in your scope by construction; equipment of another brand is never matched or modified.",
+        "operationId": "createWorkOrder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManufacturerApiWorkOrderCreateRequest"
+              },
+              "example": {
+                "externalReference": "CLM-2026-55120",
+                "customer": {
+                  "name": "Riverside Dental",
+                  "reference": "CUST-99812",
+                  "phone": "\u002B1 609 555 0142",
+                  "email": "office@riverside-dental.example"
+                },
+                "serviceLocation": {
+                  "addressLine1": "125 West State Street",
+                  "addressLine2": "Suite 3",
+                  "city": "Trenton",
+                  "state": "NJ",
+                  "zip": "08608"
+                },
+                "equipment": {
+                  "modelNumber": "AC-200",
+                  "serialNumber": "SN-77421"
+                },
+                "description": "Unit shuts down after 10 minutes and reports error E-14.",
+                "urgency": "Normal",
+                "isWarranty": true,
+                "warrantyReference": "W-4471",
+                "purchaseOrder": "PO-88213",
+                "deadline": "2026-10-15",
+                "onSiteContact": {
+                  "name": "Dana Miles",
+                  "phone": "\u002B1 609 555 0150"
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiWorkOrder"
+                },
+                "example": {
+                  "id": 10427,
+                  "number": "WO-10427",
+                  "externalReference": "CLM-2026-55120",
+                  "status": "New",
+                  "urgency": "Normal",
+                  "customer": {
+                    "id": 318,
+                    "name": "Riverside Dental",
+                    "reference": "CUST-99812"
+                  },
+                  "serviceLocation": {
+                    "id": 904,
+                    "name": "125 West State Street",
+                    "addressLine1": "125 West State Street",
+                    "addressLine2": "Suite 3",
+                    "city": "Trenton",
+                    "state": "NJ",
+                    "zip": "08608"
+                  },
+                  "equipment": {
+                    "id": 5521,
+                    "serialNumber": "SN-77421",
+                    "modelNumber": "AC-200"
+                  },
+                  "description": "Unit shuts down after 10 minutes and reports error E-14.",
+                  "isWarranty": true,
+                  "warrantyNumber": "W-4471",
+                  "createdAt": "2026-10-10T08:12:44Z",
+                  "deadline": "2026-10-15",
+                  "scheduledServiceAt": null,
+                  "dispatchedAt": null,
+                  "vendorAcceptedAt": null,
+                  "assignedAt": null,
+                  "enRouteAt": null,
+                  "onSiteAt": null,
+                  "workingAt": null,
+                  "completedAt": null,
+                  "archivedAt": null
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiWorkOrder"
+                },
+                "example": {
+                  "id": 10427,
+                  "number": "WO-10427",
+                  "externalReference": "CLM-2026-55120",
+                  "status": "New",
+                  "urgency": "Normal",
+                  "customer": {
+                    "id": 318,
+                    "name": "Riverside Dental",
+                    "reference": "CUST-99812"
+                  },
+                  "serviceLocation": {
+                    "id": 904,
+                    "name": "125 West State Street",
+                    "addressLine1": "125 West State Street",
+                    "addressLine2": "Suite 3",
+                    "city": "Trenton",
+                    "state": "NJ",
+                    "zip": "08608"
+                  },
+                  "equipment": {
+                    "id": 5521,
+                    "serialNumber": "SN-77421",
+                    "modelNumber": "AC-200"
+                  },
+                  "description": "Unit shuts down after 10 minutes and reports error E-14.",
+                  "isWarranty": true,
+                  "warrantyNumber": "W-4471",
+                  "createdAt": "2026-10-10T08:12:44Z",
+                  "deadline": "2026-10-15",
+                  "scheduledServiceAt": null,
+                  "dispatchedAt": null,
+                  "vendorAcceptedAt": null,
+                  "assignedAt": null,
+                  "enRouteAt": null,
+                  "onSiteAt": null,
+                  "workingAt": null,
+                  "completedAt": null,
+                  "archivedAt": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Unauthorized",
+                  "detail": "A valid API key is required.",
+                  "status": 401
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "externalReference": [
+                      "An external reference is required."
+                    ],
+                    "serviceLocation.zip": [
+                      "ZIP is required."
+                    ],
+                    "equipment.modelNumber": [
+                      "Model number is required."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Too many requests",
+                  "detail": "The API key has exceeded its request limit. Please retry later.",
+                  "status": 429
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "# work-order.json holds the request body shown above.\r\ncurl -X POST \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022 \\\r\n  -H \u0022Content-Type: application/json\u0022 \\\r\n  --data @work-order.json\r\n\r\n# A retry with the same externalReference is safe: it returns\r\n# the same work order (200, header Idempotent-Replayed: true)."
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Work orders"
+        ],
+        "summary": "Read a batch of work orders",
+        "description": "Reads up to 100 work orders in one call, addressed by FixFlow ids (\u0060ids\u0060), by your own references (\u0060references\u0060), or by both. Each parameter takes a comma-separated list and may also be repeated.\n\n\u0060items\u0060 carries the work orders that are yours, ordered by id. Everything else \u2014 unknown, another manufacturer\u0027s, or no longer in your scope \u2014 is echoed back under \u0060notFound\u0060, exactly as you asked for it, so one unknown identifier never fails the whole call.\n\nThis is the resync tool: when the change feed\u0027s cursor is lost or your copy looks stale, re-read the work orders you care about in batches of 100.",
+        "operationId": "getWorkOrderBatch",
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "FixFlow work-order ids, comma-separated (the parameter may also be repeated).",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "references",
+            "in": "query",
+            "description": "Your own \u0060externalReference\u0060 values, comma-separated (the parameter may also be repeated).",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiWorkOrderBatch"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": 10427,
+                      "number": "WO-10427",
+                      "externalReference": "CLM-2026-55120",
+                      "status": "Working",
+                      "urgency": "Normal",
+                      "customer": {
+                        "id": 318,
+                        "name": "Riverside Dental",
+                        "reference": "CUST-99812"
+                      },
+                      "serviceLocation": {
+                        "id": 904,
+                        "name": "125 West State Street",
+                        "addressLine1": "125 West State Street",
+                        "addressLine2": "Suite 3",
+                        "city": "Trenton",
+                        "state": "NJ",
+                        "zip": "08608"
+                      },
+                      "equipment": {
+                        "id": 5521,
+                        "serialNumber": "SN-77421",
+                        "modelNumber": "AC-200"
+                      },
+                      "description": "Unit shuts down after 10 minutes and reports error E-14.",
+                      "isWarranty": true,
+                      "warrantyNumber": "W-4471",
+                      "createdAt": "2026-10-10T08:12:44Z",
+                      "deadline": "2026-10-15",
+                      "scheduledServiceAt": "2026-10-13T13:00:00Z",
+                      "dispatchedAt": "2026-10-10T09:02:10Z",
+                      "vendorAcceptedAt": "2026-10-10T09:41:55Z",
+                      "assignedAt": "2026-10-12T07:15:00Z",
+                      "enRouteAt": "2026-10-13T12:30:04Z",
+                      "onSiteAt": "2026-10-13T13:05:21Z",
+                      "workingAt": "2026-10-13T13:12:40Z",
+                      "completedAt": null,
+                      "archivedAt": null
+                    }
+                  ],
+                  "notFound": {
+                    "ids": [
+                      99999
+                    ],
+                    "references": [
+                      "CLM-UNKNOWN"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "ids": [
+                      "At most 100 identifiers (ids and references combined) can be read at once."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "# Up to 100 ids and references in total.\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders?ids=10427,10431\u0026references=CLM-2026-55120\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/work-orders/{id}": {
+      "get": {
+        "tags": [
+          "Work orders"
+        ],
+        "summary": "Read one work order",
+        "description": "Returns the current state of one of your work orders by its FixFlow id.\n\nThe scope is every work order whose unit is one of your brand\u0027s \u2014 not only the ones you created through this API \u2014 and it includes **archived** work orders, which come back with \u0060archivedAt\u0060 set so an archived request reads as a state rather than as a disappearance.\n\nA work order that does not exist, is not yours, or carries no catalogued unit all answer the same \u0060404\u0060: the API never confirms that a row exists.",
+        "operationId": "getWorkOrder",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The FixFlow work-order id, as returned in \u0060id\u0060.",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiWorkOrder"
+                },
+                "example": {
+                  "id": 10427,
+                  "number": "WO-10427",
+                  "externalReference": "CLM-2026-55120",
+                  "status": "New",
+                  "urgency": "Normal",
+                  "customer": {
+                    "id": 318,
+                    "name": "Riverside Dental",
+                    "reference": "CUST-99812"
+                  },
+                  "serviceLocation": {
+                    "id": 904,
+                    "name": "125 West State Street",
+                    "addressLine1": "125 West State Street",
+                    "addressLine2": "Suite 3",
+                    "city": "Trenton",
+                    "state": "NJ",
+                    "zip": "08608"
+                  },
+                  "equipment": {
+                    "id": 5521,
+                    "serialNumber": "SN-77421",
+                    "modelNumber": "AC-200"
+                  },
+                  "description": "Unit shuts down after 10 minutes and reports error E-14.",
+                  "isWarranty": true,
+                  "warrantyNumber": "W-4471",
+                  "createdAt": "2026-10-10T08:12:44Z",
+                  "deadline": "2026-10-15",
+                  "scheduledServiceAt": null,
+                  "dispatchedAt": null,
+                  "vendorAcceptedAt": null,
+                  "assignedAt": null,
+                  "enRouteAt": null,
+                  "onSiteAt": null,
+                  "workingAt": null,
+                  "completedAt": null,
+                  "archivedAt": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Not found",
+                  "detail": "No such work order.",
+                  "status": 404
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/10427\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/work-orders/by-reference/{externalReference}": {
+      "get": {
+        "tags": [
+          "Work orders"
+        ],
+        "summary": "Read one work order by your own reference",
+        "description": "Same as reading by id, but addressed with the \u0060externalReference\u0060 you sent when you created the work order \u2014 so you never have to store FixFlow ids.\n\nReferences are scoped to your key: another manufacturer\u0027s reference, a reference you never used, and a work order that has since left your scope all answer \u0060404\u0060.",
+        "operationId": "getWorkOrderByReference",
+        "parameters": [
+          {
+            "name": "externalReference",
+            "in": "path",
+            "description": "The \u0060externalReference\u0060 you sent when creating the work order.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiWorkOrder"
+                },
+                "example": {
+                  "id": 10427,
+                  "number": "WO-10427",
+                  "externalReference": "CLM-2026-55120",
+                  "status": "New",
+                  "urgency": "Normal",
+                  "customer": {
+                    "id": 318,
+                    "name": "Riverside Dental",
+                    "reference": "CUST-99812"
+                  },
+                  "serviceLocation": {
+                    "id": 904,
+                    "name": "125 West State Street",
+                    "addressLine1": "125 West State Street",
+                    "addressLine2": "Suite 3",
+                    "city": "Trenton",
+                    "state": "NJ",
+                    "zip": "08608"
+                  },
+                  "equipment": {
+                    "id": 5521,
+                    "serialNumber": "SN-77421",
+                    "modelNumber": "AC-200"
+                  },
+                  "description": "Unit shuts down after 10 minutes and reports error E-14.",
+                  "isWarranty": true,
+                  "warrantyNumber": "W-4471",
+                  "createdAt": "2026-10-10T08:12:44Z",
+                  "deadline": "2026-10-15",
+                  "scheduledServiceAt": null,
+                  "dispatchedAt": null,
+                  "vendorAcceptedAt": null,
+                  "assignedAt": null,
+                  "enRouteAt": null,
+                  "onSiteAt": null,
+                  "workingAt": null,
+                  "completedAt": null,
+                  "archivedAt": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Not found",
+                  "detail": "No such work order.",
+                  "status": 404
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/by-reference/CLM-2026-55120\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/work-orders/changes": {
+      "get": {
+        "tags": [
+          "Work orders"
+        ],
+        "summary": "Poll the change feed",
+        "description": "Streams the work orders of yours that changed, so you never have to re-read the ones that did not. There are no webhooks in \u0060v1\u0060: this feed is how you track state.\n\n**The loop.** Call it once without parameters \u2014 you get no items and a \u0060nextCursor\u0060 that means \u0022from now on\u0022. Persist that cursor, then every 30\u201360 seconds call again with it; each answer gives you the changed work orders plus a new cursor to persist. While \u0060hasMore\u0060 is \u0060true\u0060 there are already more changes waiting, so you may keep calling immediately instead of waiting for the next tick.\n\n**Items are snapshots, not diffs.** Each item is the work order exactly as it is now, plus \u0060changedAt\u0060 \u2014 when we last saw it change. Several changes to one work order inside one page collapse into one item.\n\n**Be idempotent.** Delivery is at-least-once: the same snapshot can arrive twice, so apply items by id rather than counting events. For the same reason the feed deliberately lags a few seconds behind live, and a page can come back empty with a moved cursor (changes to work orders outside your scope advance it without being shown).\n\n\u0060cursor\u0060 is opaque \u2014 store it verbatim and make no assumptions about its contents. To backfill instead of subscribing, pass \u0060since\u0060 with an ISO-8601 instant; \u0060cursor\u0060 wins when you send both. If a cursor is ever lost, resync with the batch read.",
+        "operationId": "getWorkOrderChanges",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The \u0060nextCursor\u0060 of your previous page, verbatim. Omit it to subscribe from now on.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many changed work orders one page may carry: 1\u2013500, 100 by default.",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Backfill from this ISO-8601 instant instead of subscribing from now (for example \u00602026-10-13T15:48:02Z\u0060). Ignored when \u0060cursor\u0060 is sent.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiWorkOrderChangePage"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": 10427,
+                      "number": "WO-10427",
+                      "externalReference": "CLM-2026-55120",
+                      "status": "Done",
+                      "urgency": "Normal",
+                      "customer": {
+                        "id": 318,
+                        "name": "Riverside Dental",
+                        "reference": "CUST-99812"
+                      },
+                      "serviceLocation": {
+                        "id": 904,
+                        "name": "125 West State Street",
+                        "addressLine1": "125 West State Street",
+                        "addressLine2": "Suite 3",
+                        "city": "Trenton",
+                        "state": "NJ",
+                        "zip": "08608"
+                      },
+                      "equipment": {
+                        "id": 5521,
+                        "serialNumber": "SN-77421",
+                        "modelNumber": "AC-200"
+                      },
+                      "description": "Unit shuts down after 10 minutes and reports error E-14.",
+                      "isWarranty": true,
+                      "warrantyNumber": "W-4471",
+                      "createdAt": "2026-10-10T08:12:44Z",
+                      "deadline": "2026-10-15",
+                      "scheduledServiceAt": "2026-10-13T13:00:00Z",
+                      "dispatchedAt": "2026-10-10T09:02:10Z",
+                      "vendorAcceptedAt": "2026-10-10T09:41:55Z",
+                      "assignedAt": "2026-10-12T07:15:00Z",
+                      "enRouteAt": "2026-10-13T12:30:04Z",
+                      "onSiteAt": "2026-10-13T13:05:21Z",
+                      "workingAt": "2026-10-13T13:12:40Z",
+                      "completedAt": "2026-10-13T15:48:02Z",
+                      "archivedAt": null,
+                      "changedAt": "2026-10-13T15:48:02Z"
+                    }
+                  ],
+                  "nextCursor": "djE6ODgxNDI",
+                  "hasMore": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "cursor": [
+                      "The cursor is not valid. Resync with a batch read, then subscribe again."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "# 1. Subscribe from now: no items, just the current nextCursor. Store it.\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\r\n\r\n# 2. Every 30-60 s: pass the last nextCursor verbatim and store the new one.\r\n#    While hasMore is true, call again straight away.\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes?cursor=$CURSOR\u0026limit=100\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\r\n\r\n# Backfill from a moment in time instead of a cursor:\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes?since=2026-10-01T00:00:00Z\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ManufacturerApiCustomerInput": {
+        "required": [
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phone": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "email": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiEquipmentInput": {
+        "required": [
+          "modelNumber"
+        ],
+        "type": "object",
+        "properties": {
+          "modelNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "serialNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiKeyInfo": {
+        "required": [
+          "manufacturer",
+          "key"
+        ],
+        "type": "object",
+        "properties": {
+          "manufacturer": {
+            "$ref": "#/components/schemas/ManufacturerApiManufacturerInfo"
+          },
+          "key": {
+            "$ref": "#/components/schemas/ManufacturerApiKeyInfoKey"
+          }
+        }
+      },
+      "ManufacturerApiKeyInfoKey": {
+        "required": [
+          "name",
+          "prefix",
+          "createdAt",
+          "lastUsedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUsedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ManufacturerApiManufacturerInfo": {
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ManufacturerApiOnSiteContactInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phone": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiServiceLocationInput": {
+        "required": [
+          "addressLine1",
+          "city",
+          "state",
+          "zip"
+        ],
+        "type": "object",
+        "properties": {
+          "addressLine1": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "city": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "zip": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "addressLine2": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phone": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiWorkOrder": {
+        "required": [
+          "id",
+          "number",
+          "externalReference",
+          "status",
+          "urgency",
+          "customer",
+          "serviceLocation",
+          "equipment",
+          "description",
+          "isWarranty",
+          "warrantyNumber",
+          "createdAt",
+          "deadline",
+          "scheduledServiceAt",
+          "dispatchedAt",
+          "vendorAcceptedAt",
+          "assignedAt",
+          "enRouteAt",
+          "onSiteAt",
+          "workingAt",
+          "completedAt",
+          "archivedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "number": {
+            "type": "string"
+          },
+          "externalReference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkOrderStatus"
+          },
+          "urgency": {
+            "$ref": "#/components/schemas/Urgency"
+          },
+          "customer": {
+            "$ref": "#/components/schemas/ManufacturerApiWorkOrderCustomer"
+          },
+          "serviceLocation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiWorkOrderServiceLocation"
+              }
+            ]
+          },
+          "equipment": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiWorkOrderEquipment"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isWarranty": {
+            "type": "boolean"
+          },
+          "warrantyNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deadline": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "scheduledServiceAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "dispatchedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "vendorAcceptedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "assignedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "enRouteAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "onSiteAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "workingAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "archivedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderBatch": {
+        "required": [
+          "items",
+          "notFound"
+        ],
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManufacturerApiWorkOrder"
+            }
+          },
+          "notFound": {
+            "$ref": "#/components/schemas/ManufacturerApiWorkOrderNotFound"
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderChange": {
+        "required": [
+          "changedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "changedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "number": {
+            "type": "string"
+          },
+          "externalReference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkOrderStatus"
+          },
+          "urgency": {
+            "$ref": "#/components/schemas/Urgency"
+          },
+          "customer": {
+            "$ref": "#/components/schemas/ManufacturerApiWorkOrderCustomer"
+          },
+          "serviceLocation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiWorkOrderServiceLocation"
+              }
+            ]
+          },
+          "equipment": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiWorkOrderEquipment"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isWarranty": {
+            "type": "boolean"
+          },
+          "warrantyNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deadline": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "scheduledServiceAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "dispatchedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "vendorAcceptedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "assignedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "enRouteAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "onSiteAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "workingAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "archivedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderChangePage": {
+        "required": [
+          "items",
+          "nextCursor",
+          "hasMore"
+        ],
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManufacturerApiWorkOrderChange"
+            }
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderCreateRequest": {
+        "required": [
+          "externalReference",
+          "customer",
+          "serviceLocation",
+          "equipment",
+          "description"
+        ],
+        "type": "object",
+        "properties": {
+          "externalReference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "customer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiCustomerInput"
+              }
+            ]
+          },
+          "serviceLocation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiServiceLocationInput"
+              }
+            ]
+          },
+          "equipment": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiEquipmentInput"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "urgency": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isWarranty": {
+            "type": [
+              "null",
+              "boolean"
+            ]
+          },
+          "warrantyReference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "purchaseOrder": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "deadline": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "onSiteContact": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiOnSiteContactInput"
+              }
+            ]
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderCustomer": {
+        "required": [
+          "id",
+          "name",
+          "reference"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderEquipment": {
+        "required": [
+          "id",
+          "serialNumber",
+          "modelNumber"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "serialNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "modelNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderNotFound": {
+        "required": [
+          "ids",
+          "references"
+        ],
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ManufacturerApiWorkOrderServiceLocation": {
+        "required": [
+          "id",
+          "name",
+          "addressLine1",
+          "addressLine2",
+          "city",
+          "state",
+          "zip"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "addressLine1": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "addressLine2": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "city": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "zip": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "title": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "status": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "detail": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "instance": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "Urgency": {
+        "enum": [
+          "Low",
+          "Normal",
+          "Emergency"
+        ]
+      },
+      "ValidationProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "title": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "status": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "detail": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "instance": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "WorkOrderStatus": {
+        "enum": [
+          "New",
+          "Dispatched",
+          "Assigned",
+          "EnRoute",
+          "OnSite",
+          "Working",
+          "Done",
+          "Rejected"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "ApiKey": {
+        "type": "apiKey",
+        "description": "Manufacturer API key, created on the API keys page of the manufacturer portal or by FixFlow staff, and shown once at creation time. The manufacturer is taken from the key; a portal bearer token is not accepted here.",
+        "name": "X-Api-Key",
+        "in": "header"
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKey": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Keys"
+    },
+    {
+      "name": "Work orders"
+    }
+  ]
+}
