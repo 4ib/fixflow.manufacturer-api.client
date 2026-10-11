@@ -18,108 +18,186 @@
     </header>
 
     <main class="grid">
-      <section class="card" aria-labelledby="create-title">
-        <h2 id="create-title">Create a work order</h2>
-        <p class="hint">
-          <code>POST /manufacturer-api/v1/work-orders</code>. Sending the same
-          <em>Your reference</em> again returns the same work order (<code>200</code>, replayed).
-        </p>
-        <form id="create-form" novalidate>
-          <fieldset>
-            <legend>Your claim</legend>
-            <label>Your reference (externalReference) *
-              <span class="row">
-                <input name="externalReference" required />
-                <button type="button" class="secondary" id="new-reference">New</button>
-              </span>
-            </label>
-            <label>Problem description *<textarea name="description" rows="2" required></textarea></label>
-            <div class="cols">
-              <label>Urgency
-                <select name="urgency">
-                  <option>Normal</option>
-                  <option>Low</option>
-                  <option>Emergency</option>
+      <div class="column">
+        <section class="card" aria-labelledby="register-title">
+          <h2 id="register-title"><span class="step">1</span> Register your directory</h2>
+          <p class="hint">
+            Register the customer, the site and the unit once, under <em>your own</em> ids. Three calls:
+            <code>POST /customers</code>, <code>POST /service-locations</code>, <code>POST /equipment</code>.
+            A repeat returns what FixFlow has stored (<code>200</code>), so it is safe to send again.
+          </p>
+          <form id="register-form" novalidate>
+            <fieldset>
+              <legend>End customer</legend>
+              <div class="cols">
+                <label>Your customer id *<input name="customer.reference" required /></label>
+                <label>Name *<input name="customer.name" required /></label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>Site</legend>
+              <div class="cols">
+                <label>Your site id *<input name="site.reference" required /></label>
+                <label>Site name<input name="site.name" /></label>
+              </div>
+              <label>Address line 1 *<input name="site.addressLine1" required /></label>
+              <div class="cols three">
+                <label>City *<input name="site.city" required /></label>
+                <label>State *<input name="site.state" required /></label>
+                <label>ZIP *<input name="site.zip" required /></label>
+              </div>
+              <p class="hint small">The customer is registered with this address too, so FixFlow can find a customer it already has.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Unit</legend>
+              <div class="cols">
+                <label>Serial number *<input name="unit.serialNumber" required /></label>
+                <label>Model number *<input name="unit.modelNumber" required /></label>
+              </div>
+            </fieldset>
+            <div class="actions">
+              <button type="submit">Register</button>
+            </div>
+            <ol id="register-steps" class="steps" hidden></ol>
+          </form>
+        </section>
+
+        <section class="card" aria-labelledby="create-title">
+          <h2 id="create-title"><span class="step">2</span> Create a work order</h2>
+          <p class="hint">
+            <code>POST /work-orders</code> with your keys only. Sending the same claim number again
+            returns the same work order (<code>200</code>, replayed).
+          </p>
+          <form id="create-form" novalidate>
+            <fieldset>
+              <legend>Your claim</legend>
+              <label>Your claim number (externalReference) *
+                <span class="row">
+                  <input name="externalReference" required />
+                  <button type="button" class="secondary" id="new-reference">New</button>
+                </span>
+              </label>
+              <label>Problem description *<textarea name="description" rows="2" required></textarea></label>
+              <label>Problem from the catalogue
+                <select name="problemId" id="problem-select">
+                  <option value="">— none —</option>
                 </select>
               </label>
-              <label>Deadline<input name="deadline" type="date" /></label>
+              <div class="cols">
+                <label>Urgency
+                  <select name="urgency">
+                    <option>Normal</option>
+                    <option>Low</option>
+                    <option>Emergency</option>
+                  </select>
+                </label>
+                <label>Deadline<input name="deadline" type="date" /></label>
+              </div>
+              <div class="cols">
+                <label class="check"><input name="isWarranty" type="checkbox" checked /> Warranty claim</label>
+                <label>Warranty reference<input name="warrantyReference" /></label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>Your keys</legend>
+              <div class="cols">
+                <label>Customer id *<input name="customer.reference" list="customer-keys" required /></label>
+                <label>Site id *<input name="serviceLocation.reference" list="site-keys" required /></label>
+              </div>
+              <div class="cols">
+                <label>Serial number<input name="equipment.serialNumber" list="unit-keys" /></label>
+                <label>Model number<input name="equipment.modelNumber" placeholder="only for a new unit" /></label>
+              </div>
+            </fieldset>
+            <details class="inline-details">
+              <summary>Not registered yet? Send the details inline</summary>
+              <p class="hint small">Needed only for keys FixFlow does not know yet; ignored for known ones.</p>
+              <label>Customer name<input name="customer.name" /></label>
+              <label>Address line 1<input name="serviceLocation.addressLine1" /></label>
+              <div class="cols three">
+                <label>City<input name="serviceLocation.city" /></label>
+                <label>State<input name="serviceLocation.state" /></label>
+                <label>ZIP<input name="serviceLocation.zip" /></label>
+              </div>
+            </details>
+            <div class="actions">
+              <button type="submit">Create work order</button>
             </div>
-            <div class="cols">
-              <label class="check"><input name="isWarranty" type="checkbox" checked /> Warranty claim</label>
-              <label>Warranty reference<input name="warrantyReference" /></label>
-            </div>
-          </fieldset>
-          <fieldset>
-            <legend>End customer</legend>
-            <div class="cols">
-              <label>Name *<input name="customer.name" required /></label>
-              <label>Your customer id<input name="customer.reference" /></label>
-            </div>
-          </fieldset>
-          <fieldset>
-            <legend>Service location</legend>
-            <label>Address line 1 *<input name="serviceLocation.addressLine1" required /></label>
-            <div class="cols three">
-              <label>City *<input name="serviceLocation.city" required /></label>
-              <label>State *<input name="serviceLocation.state" required /></label>
-              <label>ZIP *<input name="serviceLocation.zip" required /></label>
-            </div>
-          </fieldset>
-          <fieldset>
-            <legend>Unit</legend>
-            <div class="cols">
-              <label>Model number *<input name="equipment.modelNumber" required /></label>
-              <label>Serial number<input name="equipment.serialNumber" /></label>
-            </div>
-          </fieldset>
-          <div class="actions">
-            <button type="submit">Create work order</button>
+            <div id="create-result" class="result" hidden></div>
+          </form>
+          <datalist id="customer-keys"></datalist>
+          <datalist id="site-keys"></datalist>
+          <datalist id="unit-keys"></datalist>
+        </section>
+      </div>
+
+      <div class="column">
+        <section class="card" aria-labelledby="tracked-title">
+          <div class="card-head">
+            <h2 id="tracked-title">Tracked work orders</h2>
+            <button type="button" class="secondary" id="poll-now">Poll now</button>
           </div>
-          <div id="create-result" class="result" hidden></div>
-        </form>
-      </section>
+          <p class="hint">
+            Created here or seen in <code>GET /work-orders/changes</code>. A background loop polls the
+            feed, applies each snapshot by id, then stores <code>nextCursor</code>.
+          </p>
+          <p class="feed" id="feed-state"></p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Work order · your claim</th>
+                  <th>Status</th>
+                  <th>Customer · site</th>
+                  <th>Unit</th>
+                  <th>Problem</th>
+                  <th>Scheduled</th>
+                  <th>Changed</th>
+                </tr>
+              </thead>
+              <tbody id="tracked-rows">
+                <tr><td colspan="7" class="muted">No work orders yet — create one.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-      <section class="card wide" aria-labelledby="tracked-title">
-        <div class="card-head">
-          <h2 id="tracked-title">Tracked work orders</h2>
-          <button type="button" class="secondary" id="poll-now">Poll now</button>
-        </div>
-        <p class="hint">
-          Created here or seen in <code>GET /manufacturer-api/v1/work-orders/changes</code>. A background
-          loop polls the feed, applies each snapshot by id, then stores <code>nextCursor</code>.
-        </p>
-        <p class="feed" id="feed-state"></p>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Number</th>
-                <th>Your reference</th>
-                <th>Status</th>
-                <th>Customer</th>
-                <th>Unit</th>
-                <th>Scheduled</th>
-                <th>Changed</th>
-              </tr>
-            </thead>
-            <tbody id="tracked-rows">
-              <tr><td colspan="7" class="muted">No work orders yet — create one.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
+        <section class="card" aria-labelledby="directory-title">
+          <h2 id="directory-title">Your directory</h2>
+          <p class="hint">What you registered: your key on the left, FixFlow's record on the right.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Kind</th>
+                  <th>Your key</th>
+                  <th>In FixFlow</th>
+                </tr>
+              </thead>
+              <tbody id="directory-rows">
+                <tr><td colspan="3" class="muted">Nothing registered yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-      <section class="card" aria-labelledby="lookup-title">
-        <h2 id="lookup-title">Look up a work order</h2>
-        <p class="hint">
-          <code>GET …/work-orders/{id}</code> or <code>GET …/work-orders/by-reference/{externalReference}</code>.
-        </p>
-        <form id="lookup-form" class="row">
-          <input name="query" placeholder="FixFlow id (e.g. 10001) or your reference" />
-          <button type="submit" class="secondary">Look up</button>
-        </form>
-        <pre id="lookup-result" class="json" hidden></pre>
-      </section>
+        <section class="card" aria-labelledby="lookup-title">
+          <h2 id="lookup-title">Look up</h2>
+          <p class="hint">Everything is addressed by your own keys — no FixFlow ids to store.</p>
+          <form id="lookup-form" class="row">
+            <select name="kind" aria-label="What to look up">
+              <option value="claim">Your claim number</option>
+              <option value="work-order">FixFlow work-order id</option>
+              <option value="customer">Your customer id</option>
+              <option value="site">Your site id</option>
+              <option value="serial">Serial number</option>
+            </select>
+            <input name="value" aria-label="Value" placeholder="e.g. DEMO-20261010-AB12C" />
+            <button type="submit" class="secondary">Look up</button>
+          </form>
+          <pre id="lookup-result" class="json" hidden></pre>
+        </section>
+      </div>
     </main>
 
     <footer class="muted">

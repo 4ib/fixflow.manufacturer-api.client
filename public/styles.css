@@ -81,6 +81,13 @@ code {
   align-items: start;
 }
 
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
 .card {
   min-width: 0;
   background: var(--surface);
@@ -89,8 +96,62 @@ code {
   padding: 16px 20px;
 }
 
-.card.wide {
-  grid-row: span 2;
+.step {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  vertical-align: 1px;
+}
+
+.small {
+  font-size: 12px;
+}
+
+.hint.small {
+  margin: 0 0 8px;
+}
+
+.steps {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.steps li {
+  padding: 8px 12px;
+  border-radius: 8px;
+}
+
+.steps li.ok {
+  background: #e3f5ea;
+}
+
+.steps li.error {
+  background: #fdecea;
+}
+
+.inline-details {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px dashed #d5dbe4;
+  border-radius: 8px;
+}
+
+.inline-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--accent);
+  margin-bottom: 4px;
 }
 
 .card-head {
@@ -169,6 +230,11 @@ input[type='checkbox'] {
   flex: 1;
 }
 
+.row select {
+  width: auto;
+  flex: none;
+}
+
 button {
   font: inherit;
   font-weight: 500;
@@ -236,9 +302,10 @@ td {
   white-space: nowrap;
 }
 
-/* Customer and unit may wrap; ids, statuses and times stay on one line. */
-td:nth-child(4),
-td:nth-child(5) {
+/* Free text may wrap; ids, statuses and times stay on one line. */
+#tracked-rows td:nth-child(3),
+#tracked-rows td:nth-child(5),
+#directory-rows td:nth-child(3) {
   white-space: normal;
 }
 
@@ -285,10 +352,6 @@ footer {
 
   .grid {
     grid-template-columns: 1fr;
-  }
-
-  .card.wide {
-    grid-row: auto;
   }
 
   .cols {

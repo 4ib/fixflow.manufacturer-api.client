@@ -2,10 +2,502 @@
   "openapi": "3.1.1",
   "info": {
     "title": "FixFlow Manufacturer API",
-    "description": "The **FixFlow Manufacturer API** is the machine surface of a manufacturer\u0027s own systems\n(warranty desk, CRM, reporting). It is authenticated by an API key, versioned in the path, and\ndocumented by this single artefact: the document you are reading **is** the contract.\n\nThis is release **1.0.0**, the first released version of \u0060v1\u0060. The endpoints listed below are its\nwhole surface; later releases only add to it and record every change in the\n[Changelog](#changelog).\n\n## Base URL\n\nEvery path in this document is relative to the API base of your FixFlow deployment:\n\n\u0060\u0060\u0060\nhttps://\u003Cyour-fixflow-host\u003E/fixflow\n\u0060\u0060\u0060\n\nSo the verify-key call below is \u0060GET https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/key\u0060.\nYour FixFlow contact gives you the host; the \u0060/fixflow\u0060 segment is part of the base and does not\nchange.\n\n## Getting a key\n\nUse one key per integrating system, never one per person. There are two ways to get one:\n\n- **Self-service**: sign in to the FixFlow manufacturer portal and open **API keys**. Any active\n  user of your company can create and revoke your company\u0027s keys there.\n- **Through FixFlow staff**: ask your FixFlow contact, naming the system that will use the key\n  (for example \u0060Warranty desk\u0060).\n\nEither way:\n\n1. The full key value is shown **once**, at creation time, and is never retrievable again. Store it\n   in your secret manager immediately.\n2. Call \u0060GET /manufacturer-api/v1/key\u0060 to confirm the key works and to see which manufacturer it is\n   bound to.\n\nA key can be revoked at any time; a revoked key is rejected from the next request on. To rotate,\ncreate a new key, deploy it, then revoke the old one. Several keys can be active at once, so\nrotation needs no downtime.\n\n## Authentication\n\nSend the key in the \u0060X-Api-Key\u0060 request header on **every** call:\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/key HTTP/1.1\nHost: \u003Cyour-fixflow-host\u003E\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\nRules that will not change within \u0060v1\u0060:\n\n- \u0060X-Api-Key\u0060 is the only accepted credential. A bearer token (JWT) from the FixFlow web portals is\n  **not** accepted here, and a Manufacturer API key is **not** accepted outside\n  \u0060/manufacturer-api/v1/*\u0060.\n- The manufacturer is taken from the key alone. There is no \u0060manufacturerId\u0060 parameter to pass, and\n  no way to read another manufacturer\u0027s data with your key \u2014 rows that are not yours do not exist\n  for the API.\n- Always use HTTPS. A key sent over plain HTTP must be treated as leaked and revoked.\n\n## Demo client\n\nA small MIT-licensed reference client (Node.js, TypeScript) shows the whole integration end to end:\n\n- verifying the key;\n- creating work orders with safe retries;\n- the polling loop over the change feed with a stored cursor;\n- handling \u0060429\u0060.\n\nIt runs against a built-in mock of this API, so you can try it before you have a key. Once you\ngive it your base URL and a key, it works against your FixFlow deployment. The key stays on the\nclient\u0027s server and never reaches a browser.\n\n**Repository:** coming soon. The public link will be published here.\n\n## Creating a work order\n\n\u0060POST /manufacturer-api/v1/work-orders\u0060 submits a repair request for one of your units at an end\ncustomer\u0027s site. You do not need to know any FixFlow identifier: send the customer, the service\naddress and the unit, and FixFlow matches them against its own directories or creates the missing\nrows. The work order opens in status \u0060New\u0060 and a dispatcher takes it from there; you do not choose\nthe service company.\n\nThe response is the **work-order resource** \u2014 the same shape every read returns.\n\n### Idempotency\n\n\u0060externalReference\u0060 is your own claim or case number and is **required**. It is the idempotency key,\nunique per manufacturer:\n\n- the first call with a given value creates the work order and answers \u0060201 Created\u0060 with a\n  \u0060Location\u0060 header;\n- every later call with the same value answers \u0060200 OK\u0060 with that **same, unchanged** work order and\n  the response header \u0060Idempotent-Replayed: true\u0060;\n- two calls that race each other still produce exactly one work order.\n\nSo retrying a request that timed out is always safe, and you never need a \u0022did it get through?\u0022\nlookup before retrying. The replay never changes anything: send corrected data under a **new**\n\u0060externalReference\u0060, or ask the dispatcher.\n\n### How the customer is matched\n\nThe customer of the work order is the **end customer** whose unit is broken \u2014 not you.\n\n1. If you send \u0060customer.reference\u0060 (the customer\u0027s id in your system) and we have already seen it,\n   that customer is used \u2014 even if the name or address in this request differs. The stored customer\n   is never overwritten from a request.\n2. Otherwise we look for a customer with the same name **and** a site at the same\n   \u0060addressLine1\u0060 \u002B ZIP. Name alone is never enough: two unrelated companies may share a name.\n3. Otherwise a new customer is created.\n\nIn cases 2 and 3 a \u0060customer.reference\u0060 you sent is remembered and points at that customer from then\non. Sending \u0060customer.reference\u0060 consistently is the only way to guarantee one customer record.\n\n### How the service location is matched\n\nAmong that customer\u0027s sites we look for the same \u0060addressLine1\u0060 \u002B ZIP, otherwise we create the site\n(named \u0060serviceLocation.name\u0060, or the street line if you omit it). ZIP matching uses the first five\ndigits, so \u006008608\u0060 and \u006008608-1234\u0060 are the same place. Comparisons ignore letter case and extra\nspaces.\n\n### How the unit is matched\n\nThe unit always belongs to the manufacturer your key is bound to. Matching only ever looks at your\nown units at that site \u2014 equipment of another brand is never matched and never modified, even if it\ncarries the same serial number or model.\n\n- With \u0060equipment.serialNumber\u0060 we match on the serial number.\n- Without it we match on \u0060equipment.modelNumber\u0060, but only if there is exactly one such unit at the\n  site. Several identical models, or none, means there is nothing to match safely.\n- Otherwise a new unit is created under your brand.\n\n\u0060equipment.modelNumber\u0060 is required. If it is in your model catalogue in FixFlow the unit is linked\nto that model; an unknown model number is kept as free text, so nothing is rejected over it.\n\n### Validation\n\nA body that fails validation answers \u0060422\u0060 with \u0060errors\u0060 keyed by the JSON path of the field, for\nexample \u0060customer.name\u0060 or \u0060serviceLocation.zip\u0060. All problems are reported at once. Unknown fields\nin the body are ignored.\n\n## Tracking status\n\nThere are no webhooks in \u0060v1\u0060. You poll, and we make polling cheap: the **change feed** tells you\nwhich of your work orders moved, so you never re-read the ones that did not.\n\nThe three reads all return the same work-order resource, and all of them see the same scope \u2014 every\nwork order whose unit is one of your brand\u0027s, not only the ones you created through this API,\n**including archived ones** (they come back with \u0060archivedAt\u0060 set, so archiving reads as a state and\nnot as a disappearance):\n\n| Call | Use it for |\n| --- | --- |\n| \u0060GET /manufacturer-api/v1/work-orders/changes\u0060 | The normal loop: what changed since last time |\n| \u0060GET /manufacturer-api/v1/work-orders?ids=\u2026\u0026references=\u2026\u0060 | Resync: re-read up to 100 at once |\n| \u0060GET /manufacturer-api/v1/work-orders/{id}\u0060 and \u0060/by-reference/{externalReference}\u0060 | One work order, on demand |\n\n### The polling loop\n\n1. **Subscribe.** Call \u0060changes\u0060 once with no parameters. You get \u0060items: []\u0060 and a \u0060nextCursor\u0060\n   that means \u0022from now on\u0022. Store that cursor where it survives a restart.\n2. **Poll.** Every **30\u201360 seconds** call \u0060changes?cursor=\u003Cstored cursor\u003E\u0060. Apply the \u0060items\u0060, then\n   store the new \u0060nextCursor\u0060 \u2014 ideally in the same transaction, so a crash cannot lose it.\n3. **Drain.** While the answer says \u0060hasMore: true\u0060, more changes are already waiting: call again\n   right away with the cursor you just stored instead of waiting for the next tick.\n4. **Resync** if you ever lose the cursor or suspect your copy is stale: read the work orders you\n   care about with the batch call, then subscribe again.\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/work-orders/changes?cursor=djE6ODgxNDI\u0026limit=100 HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [\n    { \u0022id\u0022: 10427, \u0022status\u0022: \u0022Done\u0022, \u0022changedAt\u0022: \u00222026-10-13T15:48:02Z\u0022 }\n  ],\n  \u0022nextCursor\u0022: \u0022djE6ODgxNTA\u0022,\n  \u0022hasMore\u0022: false\n}\n\u0060\u0060\u0060\n\n(\u0060items\u0060 entries are full work-order resources; the one above is abridged.)\n\n### Rules of the feed\n\n- **Items are snapshots, not events.** Each item is the work order exactly as it is now, plus\n  \u0060changedAt\u0060 \u2014 when we last saw it change. Several changes to one work order inside one page\n  collapse into a single item, and the feed never tells you which field moved.\n- **Delivery is at-least-once, so be idempotent.** The same snapshot can arrive twice \u2014 after a\n  retry, or simply because you reused a cursor. Apply items by \u0060id\u0060 (upsert), never by counting\n  them.\n- **The cursor is opaque.** Store the string verbatim; do not parse it, order it or build one\n  yourself. An invalid cursor answers \u0060422\u0060, and the fix is a resync, not a retry.\n- **A moved cursor with an empty page is normal.** Changes to work orders outside your scope move\n  the cursor without being shown.\n- **The feed lags a few seconds behind live** by design, so that a change committed slightly out of\n  order is never skipped. Status changes therefore reach you a few seconds after they happen.\n- \u0060limit\u0060 is 1\u2013500, 100 by default. \u0060since=\u003CISO-8601 instant\u003E\u0060 starts from a moment instead of\n  subscribing from now; \u0060cursor\u0060 wins when you send both.\n\nChanges to any of these resource fields put a work order on the feed: \u0060status\u0060 (and with it the\nstage timestamps and \u0060completedAt\u0060), \u0060urgency\u0060, \u0060description\u0060, \u0060deadline\u0060, \u0060isWarranty\u0060,\n\u0060warrantyNumber\u0060, \u0060scheduledServiceAt\u0060, the unit, and \u0060archivedAt\u0060.\n\nA work order that leaves your scope \u2014 a dispatcher relinks the unit to another brand \u2014 stops being\nreadable (\u0060404\u0060 / \u0060notFound\u0060) and does **not** produce a feed item.\n\n### Reading a batch\n\n\u0060ids\u0060 and \u0060references\u0060 take comma-separated lists and may be mixed, up to **100 identifiers in\ntotal**; more answers \u0060422\u0060. Unknown identifiers, another manufacturer\u0027s, and work orders no longer\nin your scope all come back under \u0060notFound\u0060, echoed exactly as you sent them \u2014 one bad identifier\nnever fails the whole call.\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [],\n  \u0022notFound\u0022: { \u0022ids\u0022: [99999], \u0022references\u0022: [\u0022CLM-UNKNOWN\u0022] }\n}\n\u0060\u0060\u0060\n\n## Errors\n\nEvery error response is a [\u0060ProblemDetails\u0060](https://www.rfc-editor.org/rfc/rfc9457) body with the\ncontent type \u0060application/problem\u002Bjson\u0060:\n\n\u0060\u0060\u0060json\n{\n  \u0022title\u0022: \u0022Unauthorized\u0022,\n  \u0022detail\u0022: \u0022A valid API key is required.\u0022,\n  \u0022status\u0022: 401\n}\n\u0060\u0060\u0060\n\n| Status | When | What to do |\n| --- | --- | --- |\n| \u0060401 Unauthorized\u0060 | The \u0060X-Api-Key\u0060 header is missing, empty, unknown or revoked \u2014 or a JWT was sent instead of a key. | Fix the credential. Do not retry with the same key. |\n| \u0060404 Not Found\u0060 | The addressed resource does not exist **or** belongs to another manufacturer \u2014 the two cases are deliberately indistinguishable. | Check the identifier; do not treat it as \u0022exists but forbidden\u0022. |\n| \u0060422 Unprocessable Entity\u0060 | The request body or query failed validation. \u0060errors\u0060 carries the per-field messages. | Fix the payload; retrying unchanged will fail again. |\n| \u0060429 Too Many Requests\u0060 | The per-key rate limit is exhausted. | Wait \u0060Retry-After\u0060 seconds, then retry. |\n| \u0060400 Bad Request\u0060 | The request could not be parsed or bound at all (malformed JSON, wrong parameter type). | Fix the request. |\n| \u0060409 Conflict\u0060 | A write collided with the current state of the data. | Re-read the resource and decide. |\n\n\u00605xx\u0060 responses are our fault. They are safe to retry with backoff for idempotent requests\n(\u0060GET\u0060); report them if they persist.\n\n## Rate limits\n\nRequests are counted **per key** in a one-minute sliding window; the default allowance is **120\nrequests per minute**. Over the limit the API answers \u0060429\u0060 with a \u0060Retry-After\u0060 header in seconds\nand no side effects. The limit protects the shared service, so poll on a schedule rather than in a\ntight loop, and keep one key per system so one noisy job cannot starve another.\n\n## Versioning policy\n\nThe major version lives in the path (\u0060/manufacturer-api/v1/...\u0060) and \u0060info.version\u0060 carries the\npublished document version.\n\nWithin \u0060v1\u0060 we only make **additive** changes, and your client must tolerate them:\n\n- new endpoints, new optional request fields, new response fields;\n- new values in an existing enumeration;\n- new \u00604xx\u0060 reasons for input we already rejected.\n\nA **breaking** change \u2014 removing or renaming a path, operation, parameter or response field,\nnarrowing a type, dropping an enumeration value, or making an existing input required \u2014 is never\nshipped inside \u0060v1\u0060. It goes to \u0060/manufacturer-api/v2\u0060, which is announced before it is released and\nruns alongside \u0060v1\u0060.\n\nThis is enforced on our side, not promised in prose: release \u00601.0.0\u0060 of this document is frozen as a\ncompatibility baseline, and our build compares every later document against it. A change that\nremoves or narrows anything, or makes an input required, fails the build before it can be released.\n\nPractical client rules: ignore unknown response fields, treat unknown enumeration values as\n\u0022unmapped\u0022 instead of failing, and never depend on property order or on the exact wording of\n\u0060title\u0060/\u0060detail\u0060.\n\n## Changelog\n\n### 1.0.0 \u2014 2026-10-10 \u2014 initial release\n\nThe first released version of the contract, and the compatibility baseline of \u0060v1\u0060:\n\n- \u0060GET /manufacturer-api/v1/key\u0060 \u2014 verify a key and read the manufacturer it is bound to.\n- \u0060POST /manufacturer-api/v1/work-orders\u0060 \u2014 create a work order; idempotent on \u0060externalReference\u0060\n  (\u0060200\u0060 \u002B \u0060Idempotent-Replayed: true\u0060 on a repeat).\n- \u0060GET /manufacturer-api/v1/work-orders/{id}\u0060 and\n  \u0060GET /manufacturer-api/v1/work-orders/by-reference/{externalReference}\u0060 \u2014 read one work order;\n  unknown, another manufacturer\u0027s and out-of-scope all answer \u0060404\u0060.\n- \u0060GET /manufacturer-api/v1/work-orders?ids=\u2026\u0026references=\u2026\u0060 \u2014 read up to 100 at once \u2192\n  \u0060{ items, notFound }\u0060.\n- \u0060GET /manufacturer-api/v1/work-orders/changes\u0060 \u2014 the change feed with an opaque cursor \u2192\n  \u0060{ items, nextCursor, hasMore }\u0060; see [Tracking status](#tracking-status).\n- Reads see archived work orders too (\u0060archivedAt\u0060 is set on them).\n- \u0060X-Api-Key\u0060 authentication, \u0060ProblemDetails\u0060 errors, per-key rate limit.\n\nThe \u00601.0.0-preview\u0060, \u00601.1.0-preview\u0060 and \u00601.2.0-preview\u0060 documents published while the API was being\nbuilt are superseded by this release. Nothing that was in them was removed or narrowed.\n",
+    "description": "The **FixFlow Manufacturer API** is the machine surface of a manufacturer\u0027s own systems\n(warranty desk, CRM, reporting). It is authenticated by an API key, versioned in the path, and\ndocumented by this single artefact: the document you are reading **is** the contract.\n\nThis is release **1.0.0**, the first released version of \u0060v1\u0060. The endpoints listed below are its\nwhole surface; later releases only add to it and record every change in the\n[Changelog](#changelog).\n\n## Getting started\n\nThree words are used throughout: a **site** is one service location of one of your end customers, a\n**unit** is one installed piece of your equipment, and a **work order** is the repair request FixFlow\ntracks (your own system may call it a claim or a case).\n\nThe whole integration is five steps, in this order:\n\n1. **Get a key** and store it \u2014 [Getting a key](#getting-a-key). It goes into the \u0060X-Api-Key\u0060 header\n   of every call ([Authentication](#authentication)).\n2. **Verify the key**: \u0060GET /manufacturer-api/v1/key\u0060 answers with the manufacturer your key is\n   bound to. If this call works, everything below is reachable.\n3. **Register your directory** \u2014 [Registering your directory](#registering-your-directory):\n   \u0060POST /customers\u0060 per end customer, \u0060POST /service-locations\u0060 per site of that customer,\n   \u0060POST /equipment\u0060 per installed unit. Each one is addressed by **your own** key and is idempotent\n   on it, so re-registering everything nightly is safe and cheap.\n4. **Create work orders with keys only** \u2014 [Creating a work order](#creating-a-work-order):\n   \u0060POST /work-orders\u0060 with \u0060externalReference\u0060, \u0060customer.reference\u0060, \u0060serviceLocation.reference\u0060,\n   the unit\u0027s \u0060serialNumber\u0060, a \u0060description\u0060, and optionally a \u0060problemId\u0060 from the\n   [problem catalog](#problem-catalog). Because the keys are already registered, the work order\n   needs nothing else \u2014 see [Which fields are needed when](#which-fields-are-needed-when).\n5. **Poll the feed** \u2014 [Tracking status](#tracking-status): subscribe once to\n   \u0060GET /work-orders/changes\u0060, store the cursor it returns, then poll every 30\u201360 seconds and apply\n   the snapshots you get.\n\nSteps 3 and 4 can be mixed in any order: a work order for a key we have never seen registers that\nkey on the way, and then it also has to carry the customer\u0027s name and the site\u0027s address.\nRegistering up front simply means every work order is \u0022keys only\u0022 from the very first one.\n\n## Base URL\n\nEvery path in this document is relative to the API base of your FixFlow deployment:\n\n\u0060\u0060\u0060\nhttps://\u003Cyour-fixflow-host\u003E/fixflow\n\u0060\u0060\u0060\n\nSo the verify-key call below is \u0060GET https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/key\u0060.\nYour FixFlow contact gives you the host; the \u0060/fixflow\u0060 segment is part of the base and does not\nchange.\n\n## Getting a key\n\nUse one key per integrating system, never one per person. There are two ways to get one:\n\n- **Self-service**: sign in to the FixFlow manufacturer portal and open **API keys**. Any active\n  user of your company can create and revoke your company\u0027s keys there.\n- **Through FixFlow staff**: ask your FixFlow contact, naming the system that will use the key\n  (for example \u0060Warranty desk\u0060).\n\nEither way:\n\n1. The full key value is shown **once**, at creation time, and is never retrievable again. Store it\n   in your secret manager immediately.\n2. Call \u0060GET /manufacturer-api/v1/key\u0060 to confirm the key works and to see which manufacturer it is\n   bound to.\n\nA key can be revoked at any time; a revoked key is rejected from the next request on. To rotate,\ncreate a new key, deploy it, then revoke the old one. Several keys can be active at once, so\nrotation needs no downtime.\n\n## Authentication\n\nSend the key in the \u0060X-Api-Key\u0060 request header on **every** call:\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/key HTTP/1.1\nHost: \u003Cyour-fixflow-host\u003E\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\nRules that will not change within \u0060v1\u0060:\n\n- \u0060X-Api-Key\u0060 is the only accepted credential. A bearer token (JWT) from the FixFlow web portals is\n  **not** accepted here, and a Manufacturer API key is **not** accepted outside\n  \u0060/manufacturer-api/v1/*\u0060.\n- The manufacturer is taken from the key alone. There is no \u0060manufacturerId\u0060 parameter to pass, and\n  no way to read another manufacturer\u0027s data with your key \u2014 rows that are not yours do not exist\n  for the API.\n- Always use HTTPS. A key sent over plain HTTP must be treated as leaked and revoked.\n\n## Demo client\n\nA small MIT-licensed reference client (Node.js, TypeScript) shows the whole integration end to end:\n\n- verifying the key;\n- creating work orders with safe retries;\n- the polling loop over the change feed with a stored cursor;\n- handling \u0060429\u0060.\n\nIt runs against a built-in mock of this API, so you can try it before you have a key. Once you\ngive it your base URL and a key, it works against your FixFlow deployment. The key stays on the\nclient\u0027s server and never reaches a browser.\n\n**Repository:** coming soon. The public link will be published here.\n\n## Registering your directory\n\nYou can register your end customers, their sites and your installed units **before** you ever send a\nwork order, instead of letting the first work order create them. Either way works \u2014 and you can mix\nthem \u2014 but registering up front means the keys are already known by the time a work order arrives,\nso the work order itself needs nothing but those keys.\n\n| Call | What it does |\n| --- | --- |\n| \u0060POST /manufacturer-api/v1/customers\u0060 | Registers an end customer under your own \u0060reference\u0060 |\n| \u0060GET /manufacturer-api/v1/customers/{reference}\u0060 | Reads that customer back |\n| \u0060POST /manufacturer-api/v1/service-locations\u0060 | Registers one of that customer\u0027s sites under your own \u0060reference\u0060 |\n| \u0060GET /manufacturer-api/v1/service-locations/{reference}\u0060 | Reads that site back |\n| \u0060POST /manufacturer-api/v1/equipment\u0060 | Registers one of your units at that site, keyed by its serial number |\n| \u0060GET /manufacturer-api/v1/equipment?serialNumber=\u2026\u0060 | Looks your units up by serial number |\n\nThe directory belongs to the service company, so registration only ever **finds or creates** a row:\n\n- it **never updates or deletes** anything \u2014 a name or address you send for a row we already have is\n  ignored, and corrections go to your FixFlow contact;\n- there is no \u0060PUT\u0060, \u0060PATCH\u0060 or \u0060DELETE\u0060, and no listing: a registered row is read back one key at a\n  time.\n\n### Idempotency\n\n\u0060reference\u0060 is the idempotency key, exactly as \u0060externalReference\u0060 is for a work order:\n\n- the first call with a given value answers \u0060201 Created\u0060 with a \u0060Location\u0060 header \u2014 both when a new\n  row was created and when an existing one was found;\n- every later call with the same value answers \u0060200 OK\u0060 with the **same, unchanged** row and the\n  response header \u0060Idempotent-Replayed: true\u0060. The body of a repeat is ignored entirely;\n- two calls that race each other still produce exactly one row and one mapping.\n\nSo retrying a timed-out registration is always safe, and a nightly \u0022register everything again\u0022 job\ncosts nothing but requests.\n\n### Registering a customer\n\n\u0060\u0060\u0060http\nPOST /fixflow/manufacturer-api/v1/customers HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nContent-Type: application/json\n\n{\n  \u0022reference\u0022: \u0022CUST-99812\u0022,\n  \u0022name\u0022: \u0022Riverside Dental\u0022,\n  \u0022address\u0022: {\n    \u0022addressLine1\u0022: \u0022125 West State Street\u0022,\n    \u0022addressLine2\u0022: \u0022Suite 3\u0022,\n    \u0022city\u0022: \u0022Trenton\u0022,\n    \u0022state\u0022: \u0022NJ\u0022,\n    \u0022zip\u0022: \u002208608\u0022\n  },\n  \u0022phone\u0022: \u0022\u002B1 609 555 0142\u0022\n}\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{ \u0022id\u0022: 318, \u0022reference\u0022: \u0022CUST-99812\u0022, \u0022name\u0022: \u0022Riverside Dental\u0022 }\n\u0060\u0060\u0060\n\n\u0060reference\u0060 and \u0060name\u0060 are required. \u0060address\u0060 is optional, but if you send it, \u0060addressLine1\u0060,\n\u0060city\u0060, \u0060state\u0060 and \u0060zip\u0060 are all required \u2014 and it is what makes matching possible:\n\n- **with \u0060address\u0060** we look for a customer with the same name **and** the same \u0060addressLine1\u0060 \u002B ZIP,\n  either as the customer\u0027s own address or as the address of one of its sites, and map your key onto\n  it; otherwise a new customer is created from what you sent;\n- **without \u0060address\u0060** nothing is matched and a new customer is always created. A name alone is\n  never enough: two unrelated companies may share one.\n\nSo send the address whenever you have it \u2014 that is how your key lands on a customer a dispatcher or\nanother manufacturer already created, instead of a duplicate.\n\n### Registering a service location\n\n\u0060\u0060\u0060http\nPOST /fixflow/manufacturer-api/v1/service-locations HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nContent-Type: application/json\n\n{\n  \u0022reference\u0022: \u0022SITE-4471\u0022,\n  \u0022customerReference\u0022: \u0022CUST-99812\u0022,\n  \u0022name\u0022: \u0022Trenton clinic\u0022,\n  \u0022addressLine1\u0022: \u0022125 West State Street\u0022,\n  \u0022addressLine2\u0022: \u0022Suite 3\u0022,\n  \u0022city\u0022: \u0022Trenton\u0022,\n  \u0022state\u0022: \u0022NJ\u0022,\n  \u0022zip\u0022: \u002208608\u0022,\n  \u0022phone\u0022: \u0022\u002B1 609 555 0150\u0022\n}\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{\n  \u0022id\u0022: 904,\n  \u0022reference\u0022: \u0022SITE-4471\u0022,\n  \u0022customer\u0022: { \u0022id\u0022: 318, \u0022reference\u0022: \u0022CUST-99812\u0022, \u0022name\u0022: \u0022Riverside Dental\u0022 },\n  \u0022name\u0022: \u0022Trenton clinic\u0022,\n  \u0022addressLine1\u0022: \u0022125 West State Street\u0022,\n  \u0022addressLine2\u0022: \u0022Suite 3\u0022,\n  \u0022city\u0022: \u0022Trenton\u0022,\n  \u0022state\u0022: \u0022NJ\u0022,\n  \u0022zip\u0022: \u002208608\u0022\n}\n\u0060\u0060\u0060\n\n\u0060reference\u0060 is your own id for the site, up to 100 characters; if your system has no such id, see\n[No site id in your system?](#the-two-keys-you-must-send) \u2014 it is the same key the work-order call\ntakes. \u0060customerReference\u0060 must be a customer **you** have already registered, otherwise the call\nanswers \u0060422\u0060 on that field \u2014 register the customer first. The address is always required here, because it is\nwhat the site is matched by: among that customer\u0027s existing sites we look for the same\n\u0060addressLine1\u0060 \u002B ZIP and map your key onto it, otherwise the site is created and named \u0060name\u0060 (or,\nif you omit it, after the street line).\n\n### Registering a unit\n\n\u0060\u0060\u0060http\nPOST /fixflow/manufacturer-api/v1/equipment HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nContent-Type: application/json\n\n{\n  \u0022serviceLocationReference\u0022: \u0022SITE-4471\u0022,\n  \u0022serialNumber\u0022: \u0022SN-77421\u0022,\n  \u0022modelNumber\u0022: \u0022AC-200\u0022,\n  \u0022name\u0022: \u0022Rooftop unit A\u0022\n}\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{\n  \u0022id\u0022: 7741,\n  \u0022serialNumber\u0022: \u0022SN-77421\u0022,\n  \u0022modelNumber\u0022: \u0022AC-200\u0022,\n  \u0022name\u0022: \u0022Rooftop unit A\u0022,\n  \u0022serviceLocation\u0022: { \u0022id\u0022: 904, \u0022reference\u0022: \u0022SITE-4471\u0022 }\n}\n\u0060\u0060\u0060\n\nA unit has no key of yours: its key is its **serial number**, among the units of your own brand. So\n\u0060serialNumber\u0060 is required here, and so is \u0060modelNumber\u0060 \u2014 a unit that is created needs at least one\nway to say what it is. \u0060serviceLocationReference\u0060 must be a site **you** have already registered,\notherwise the call answers \u0060422\u0060 on that field. \u0060name\u0060 is what a dispatcher sees in lists; omit it and\nthe model number is used.\n\nThe serial number is the idempotency key, together with the site:\n\n- no unit of yours carries it yet \u2192 the unit is created under your brand \u2192 \u0060201 Created\u0060 with a\n  \u0060Location\u0060 header pointing at the lookup below;\n- one of your units **at that same site** already carries it \u2192 \u0060200 OK\u0060 with the same, unchanged unit\n  and \u0060Idempotent-Replayed: true\u0060;\n- one of your units **at a different site** carries it \u2192 \u0060409 Conflict\u0060, and nothing is changed. We\n  never move a unit between sites: if the equipment really was relocated, ask the dispatcher.\n\nUnlike customers and sites, two **parallel** registrations of one new serial number may create two\nunits \u2014 there is no database-level guard on a serial number. Repeats one after another are safe, so\nregister serially (or just retry on failure) and a duplicate stays an edge case a dispatcher can\nmerge.\n\nIf \u0060modelNumber\u0060 is in your model catalogue in FixFlow the unit is linked to that model; an unknown\nmodel number is kept as free text, so nothing is rejected over it.\n\nMatching only ever looks at units of **your** brand: equipment of another brand is never matched,\nchanged or reported, even when it carries the very same serial number. A unit created this way is\nvisible to you in every work-order read, exactly like one created by a work order.\n\n### Looking a unit up\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/equipment?serialNumber=SN-77421 HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [\n    {\n      \u0022id\u0022: 7741,\n      \u0022serialNumber\u0022: \u0022SN-77421\u0022,\n      \u0022modelNumber\u0022: \u0022AC-200\u0022,\n      \u0022name\u0022: \u0022Rooftop unit A\u0022,\n      \u0022serviceLocation\u0022: { \u0022id\u0022: 904, \u0022reference\u0022: \u0022SITE-4471\u0022 }\n    }\n  ]\n}\n\u0060\u0060\u0060\n\n\u0060serialNumber\u0060 is required (\u0060422\u0060 otherwise). The answer is a list because historical duplicates can\nexist in the directory; normally there is exactly one item, and an unknown serial number is an empty\n\u0060items\u0060 rather than a \u0060404\u0060. Comparison ignores letter case and extra spaces, and the scope is your\nown brand only. \u0060serviceLocation.reference\u0060 is your key for that site, or \u0060null\u0060 if you never\nregistered one for it \u2014 which is what you see for a unit a work order or a dispatcher created.\n\nThere is no update, no delete and no read by FixFlow id for units either.\n\n### Reading a registration back\n\nThe customer and site reads are addressed by **your** key and scoped to it: a reference you never\nregistered, and the same value registered by another manufacturer, both answer the same \u0060404\u0060. The\nresources are deliberately minimal \u2014 phone, email and the customer\u0027s own address stay inside FixFlow.\n\u0060customer.reference\u0060 on a site is your key for that customer, or \u0060null\u0060 if you never registered one.\n\n## Creating a work order\n\n\u0060POST /manufacturer-api/v1/work-orders\u0060 submits a repair request for one of your units at an end\ncustomer\u0027s site. You do not need to know any FixFlow identifier: you address the customer and the\nsite with **your own keys**, and FixFlow matches them against its own directories or creates the\nmissing rows. The work order opens in status \u0060New\u0060 and a dispatcher takes it from there; you do not\nchoose the service company.\n\nThe response is the **work-order resource** \u2014 the same shape every read returns.\n\n### The two keys you must send\n\n| Field | What it is |\n| --- | --- |\n| \u0060customer.reference\u0060 | the end customer\u0027s id in **your** system |\n| \u0060serviceLocation.reference\u0060 | the site\u0027s id in **your** system |\n\nBoth are required, both are strings of up to 100 characters, and both are scoped to your key: the\nsame value used by another manufacturer points at something else entirely and is never read or\nchanged by your calls.\n\nSend them consistently and every later work order for that site lands on the same customer and the\nsame site in FixFlow \u2014 an address written differently the second time no longer creates a duplicate.\n\n**No site id in your system?** Use any key you can rebuild from your own data for the same site\nevery time \u2014 for example the customer id plus the site number (\u0060CUST-99812/4\u0060), the id of the\ninstallation record, or (when a customer has exactly one site) the customer id with a fixed suffix.\nIt never has to mean anything to FixFlow; it only has to be stable, unique among your sites and no\nlonger than 100 characters. The same answer applies to\n\u0060serviceLocation.reference\u0060 in [Registering a service location](#registering-a-service-location) \u2014\nthere is one kind of site key, used by both calls.\n\n### Which fields are needed when\n\nResolution is **key first, then data**. A key we have already seen leads straight to its directory\nrow, so everything that would otherwise be used to find that row becomes unnecessary \u2014 and is\nignored if you send it anyway. We never overwrite a stored customer or site from a request.\n\nThis table is the **one place** the conditional fields are stated; the sections below only explain\nhow each row is matched.\n\n| Field | Needed |\n| --- | --- |\n| \u0060externalReference\u0060 | **always** \u2014 it is the idempotency key of the call |\n| \u0060customer.reference\u0060, \u0060serviceLocation.reference\u0060 | **always** \u2014 your own keys, up to 100 characters |\n| \u0060description\u0060 | **always** \u2014 it is what the dispatcher reads first |\n| \u0060customer.name\u0060 | only while \u0060customer.reference\u0060 is still unknown to us |\n| \u0060serviceLocation.addressLine1\u0060, \u0060.city\u0060, \u0060.state\u0060, \u0060.zip\u0060 | only while \u0060serviceLocation.reference\u0060 is still unknown to us |\n| \u0060equipment.modelNumber\u0060 | only when no unit of yours with that \u0060serialNumber\u0060 is found at the site |\n| \u0060equipment.serialNumber\u0060 | never required, but it is what identifies the unit \u2014 send it whenever you have it |\n| \u0060problemId\u0060 | never \u2014 it is optional (see [Problem catalog](#problem-catalog)) |\n| \u0060urgency\u0060, \u0060deadline\u0060, \u0060isWarranty\u0060, \u0060warrantyReference\u0060, \u0060purchaseOrder\u0060, \u0060serviceLocation.name\u0060, \u0060serviceLocation.addressLine2\u0060, \u0060serviceLocation.phone\u0060, \u0060customer.phone\u0060, \u0060customer.email\u0060, \u0060equipment.name\u0060, \u0060onSiteContact\u0060 | never \u2014 all optional detail |\n\nThe schema marks as required only what is required **always**, so the simplest way to work is to\nkeep sending the full body: the first work order for a customer or site registers the key, and later\nones may send the keys alone. A field that is needed and missing answers \u0060422\u0060 naming that very\nfield, so nothing is ever silently guessed.\n\nA key you registered in advance (see [Registering your directory](#registering-your-directory)) is\nalready known, so a work order for it can carry **nothing but the keys** \u2014 no customer name, no\naddress:\n\n\u0060\u0060\u0060json\n{\n  \u0022externalReference\u0022: \u0022CLM-2026-55120\u0022,\n  \u0022customer\u0022: { \u0022reference\u0022: \u0022CUST-99812\u0022 },\n  \u0022serviceLocation\u0022: { \u0022reference\u0022: \u0022SITE-4471\u0022 },\n  \u0022equipment\u0022: { \u0022modelNumber\u0022: \u0022AC-200\u0022, \u0022serialNumber\u0022: \u0022SN-77421\u0022 },\n  \u0022description\u0022: \u0022Unit shuts down after 10 minutes and reports error E-14.\u0022\n}\n\u0060\u0060\u0060\n\n### Idempotency\n\n\u0060externalReference\u0060 is your own claim or case number and is **required**. It is the idempotency key,\nunique per manufacturer:\n\n- the first call with a given value creates the work order and answers \u0060201 Created\u0060 with a\n  \u0060Location\u0060 header;\n- every later call with the same value answers \u0060200 OK\u0060 with that **same, unchanged** work order and\n  the response header \u0060Idempotent-Replayed: true\u0060;\n- two calls that race each other still produce exactly one work order.\n\nSo retrying a request that timed out is always safe, and you never need a \u0022did it get through?\u0022\nlookup before retrying. The replay never changes anything: send corrected data under a **new**\n\u0060externalReference\u0060, or ask the dispatcher.\n\n### How the customer is matched\n\nThe customer of the work order is the **end customer** whose unit is broken \u2014 not you.\n\n1. If \u0060customer.reference\u0060 is one we have already seen, that customer is used \u2014 even if the name or\n   address in this request differs.\n2. Otherwise \u0060customer.name\u0060 is required, and we look for a customer with the same name **and** a\n   site at the same \u0060addressLine1\u0060 \u002B ZIP. Name alone is never enough: two unrelated companies may\n   share a name. If you sent a site key we already know, the address of that site is used for this\n   step, and any address in the request is ignored.\n3. Otherwise a new customer is created.\n\nIn cases 2 and 3 your \u0060customer.reference\u0060 is remembered and points at that customer from then on.\n\n### How the service location is matched\n\n1. If \u0060serviceLocation.reference\u0060 is one we have already seen, that site is used and the address in\n   the request is ignored. The site must belong to the customer resolved above \u2014 a site of a\n   different customer answers \u0060422\u0060 on \u0060serviceLocation.reference\u0060, because a work order must not\n   land on someone else\u0027s site. So does a site that has since been deactivated in FixFlow: send a new\n   site key for it.\n2. Otherwise the full address is required, and among that customer\u0027s sites we look for the same\n   \u0060addressLine1\u0060 \u002B ZIP, otherwise we create the site (named \u0060serviceLocation.name\u0060, or the street\n   line if you omit it). Your \u0060serviceLocation.reference\u0060 is remembered and points at that site from\n   then on.\n\nZIP matching uses the first five digits, so \u006008608\u0060 and \u006008608-1234\u0060 are the same place. Comparisons\nignore letter case and extra spaces.\n\nThe resource echoes your key back as \u0060serviceLocation.reference\u0060, so a read tells you which of your\nsites a work order belongs to without storing FixFlow ids.\n\n### How the unit is matched\n\nThe unit always belongs to the manufacturer your key is bound to. Matching only ever looks at your\nown units at that site \u2014 equipment of another brand is never matched and never modified, even if it\ncarries the same serial number or model.\n\n- With \u0060equipment.serialNumber\u0060 we match on the serial number; a unit found that way needs no\n  \u0060equipment.modelNumber\u0060.\n- Without a serial number we match on \u0060equipment.modelNumber\u0060, but only if there is exactly one such\n  unit at the site. Several identical models, or none, means there is nothing to match safely.\n- Otherwise a new unit is created under your brand, and \u0060equipment.modelNumber\u0060 is required for it\n  (\u0060422\u0060 otherwise).\n\nIf the model number is in your model catalogue in FixFlow the unit is linked to that model; an\nunknown model number is kept as free text, so nothing is rejected over it.\n\nA unit you registered in advance (see [Registering your directory](#registering-your-directory)) is\nfound by its serial number alone. Note that work-order create is deliberately more lenient than\nregistration here: a serial number known at **another** site creates a new unit at the site of the\nwork order instead of answering \u0060409\u0060, because a service request matters more than a tidy directory.\n\n### Naming the fault\n\n\u0060description\u0060 is free text and always required \u2014 it is what the dispatcher reads first\n(see [Which fields are needed when](#which-fields-are-needed-when)). On top of it you may send\n\u0060problemId\u0060, the id of an entry in our [problem catalog](#problem-catalog), so the fault is also\nclassified the same way our own dispatchers classify it.\n\n- It is optional. Without it the work order simply arrives unclassified and a dispatcher assigns a\n  problem on triage.\n- An id that is not in the catalogue answers \u0060422\u0060 on \u0060problemId\u0060; we never silently drop it.\n- We do not check that the problem suits the unit\u0027s equipment type \u2014 a plausible mismatch is a\n  dispatcher\u0027s call, not a reason to reject a service request.\n- The dispatcher may change the problem later. The work-order resource always shows the current one\n  as \u0060problem { id, name }\u0060 (or \u0060null\u0060), and the change reaches you through the change feed.\n\n### Validation\n\nA body that fails validation answers \u0060422\u0060 with \u0060errors\u0060 keyed by the JSON path of the field, for\nexample \u0060customer.reference\u0060 or \u0060serviceLocation.zip\u0060. Problems are reported in groups, all entries\nof a group at once: first the structural ones (a missing key, a value that is too long, a malformed\n\u0060urgency\u0060 or \u0060deadline\u0060), then \u2014 once your keys have been looked up \u2014 the fields this particular\nrequest still needs. Unknown fields in the body are ignored.\n\n## Tracking status\n\nThere are no webhooks in \u0060v1\u0060. You poll, and we make polling cheap: the **change feed** tells you\nwhich of your work orders moved, so you never re-read the ones that did not.\n\nThe three reads all return the same work-order resource, and all of them see the same scope \u2014 every\nwork order whose unit is one of your brand\u0027s, not only the ones you created through this API,\n**including archived ones** (they come back with \u0060archivedAt\u0060 set, so archiving reads as a state and\nnot as a disappearance):\n\n| Call | Use it for |\n| --- | --- |\n| \u0060GET /manufacturer-api/v1/work-orders/changes\u0060 | The normal loop: what changed since last time |\n| \u0060GET /manufacturer-api/v1/work-orders?ids=\u2026\u0026references=\u2026\u0060 | Resync: re-read up to 100 at once |\n| \u0060GET /manufacturer-api/v1/work-orders/{id}\u0060 and \u0060/by-reference/{externalReference}\u0060 | One work order, on demand |\n\n### The polling loop\n\n1. **Subscribe.** Call \u0060changes\u0060 once with no parameters. You get \u0060items: []\u0060 and a \u0060nextCursor\u0060\n   that means \u0022from now on\u0022. Store that cursor where it survives a restart.\n2. **Poll.** Every **30\u201360 seconds** call \u0060changes?cursor=\u003Cstored cursor\u003E\u0060. Apply the \u0060items\u0060, then\n   store the new \u0060nextCursor\u0060 \u2014 ideally in the same transaction, so a crash cannot lose it.\n3. **Drain.** While the answer says \u0060hasMore: true\u0060, more changes are already waiting: call again\n   right away with the cursor you just stored instead of waiting for the next tick.\n4. **Resync** if you ever lose the cursor or suspect your copy is stale: read the work orders you\n   care about with the batch call, then subscribe again.\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/work-orders/changes?cursor=djE6ODgxNDI\u0026limit=100 HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [\n    { \u0022id\u0022: 10427, \u0022status\u0022: \u0022Done\u0022, \u0022changedAt\u0022: \u00222026-10-13T15:48:02Z\u0022 }\n  ],\n  \u0022nextCursor\u0022: \u0022djE6ODgxNTA\u0022,\n  \u0022hasMore\u0022: false\n}\n\u0060\u0060\u0060\n\n(\u0060items\u0060 entries are full work-order resources; the one above is abridged.)\n\n### Rules of the feed\n\n- **Items are snapshots, not events.** Each item is the work order exactly as it is now, plus\n  \u0060changedAt\u0060 \u2014 when we last saw it change. Several changes to one work order inside one page\n  collapse into a single item, and the feed never tells you which field moved.\n- **Delivery is at-least-once, so be idempotent.** The same snapshot can arrive twice \u2014 after a\n  retry, or simply because you reused a cursor. Apply items by \u0060id\u0060 (upsert), never by counting\n  them.\n- **The cursor is opaque.** Store the string verbatim; do not parse it, order it or build one\n  yourself. An invalid cursor answers \u0060422\u0060, and the fix is a resync, not a retry.\n- **A moved cursor with an empty page is normal.** Changes to work orders outside your scope move\n  the cursor without being shown.\n- **The feed lags a few seconds behind live** by design, so that a change committed slightly out of\n  order is never skipped. Status changes therefore reach you a few seconds after they happen.\n- \u0060limit\u0060 is 1\u2013500, 100 by default. \u0060since=\u003CISO-8601 instant\u003E\u0060 starts from a moment instead of\n  subscribing from now; \u0060cursor\u0060 wins when you send both.\n\nChanges to any of these resource fields put a work order on the feed: \u0060status\u0060 (and with it the\nstage timestamps and \u0060completedAt\u0060), \u0060urgency\u0060, \u0060description\u0060, \u0060deadline\u0060, \u0060isWarranty\u0060,\n\u0060warrantyNumber\u0060, \u0060scheduledServiceAt\u0060, the unit, the \u0060problem\u0060, and \u0060archivedAt\u0060.\n\nA work order that leaves your scope \u2014 a dispatcher relinks the unit to another brand \u2014 stops being\nreadable (\u0060404\u0060 / \u0060notFound\u0060) and does **not** produce a feed item.\n\n### Reading a batch\n\n\u0060ids\u0060 and \u0060references\u0060 take comma-separated lists and may be mixed, up to **100 identifiers in\ntotal**; more answers \u0060422\u0060. Unknown identifiers, another manufacturer\u0027s, and work orders no longer\nin your scope all come back under \u0060notFound\u0060, echoed exactly as you sent them \u2014 one bad identifier\nnever fails the whole call.\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [],\n  \u0022notFound\u0022: { \u0022ids\u0022: [99999], \u0022references\u0022: [\u0022CLM-UNKNOWN\u0022] }\n}\n\u0060\u0060\u0060\n\n## Problem catalog\n\n\u0060GET /manufacturer-api/v1/problems\u0060 returns the catalogue of problem codes our dispatchers use, so\nyou can classify a fault with \u0060problemId\u0060 (see [Naming the fault](#naming-the-fault)) instead of\ndescribing it in free text only.\n\nThe catalogue belongs to the service company. It is read-only through this API \u2014 there is no way to\nadd, change or remove an entry \u2014 and it is **not** manufacturer-specific: every key sees the same\nentries. Internal accounting attributes (estimates, DNE limits, GL codes, CapEx and deferral flags)\nare never part of the response.\n\n| Field | What it is |\n| --- | --- |\n| \u0060id\u0060 | what you send as \u0060problemId\u0060 |\n| \u0060name\u0060 | the problem as a dispatcher reads it |\n| \u0060code\u0060 | our catalogue code, or \u0060null\u0060 |\n| \u0060description\u0060 | a longer explanation, or \u0060null\u0060 |\n| \u0060equipmentType\u0060 | the equipment type this problem belongs to, by name, or \u0060null\u0060 |\n\n\u0060\u0060\u0060http\nGET /fixflow/manufacturer-api/v1/problems?equipmentType=HVAC\u0026limit=100 HTTP/1.1\nX-Api-Key: ffmfr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\u0060\u0060\u0060\n\n\u0060\u0060\u0060json\n{\n  \u0022items\u0022: [\n    {\n      \u0022id\u0022: 412,\n      \u0022name\u0022: \u0022Unit does not cool\u0022,\n      \u0022code\u0022: \u0022HVAC-COOL\u0022,\n      \u0022description\u0022: \u0022No cooling at all, or the discharge air stays above setpoint.\u0022,\n      \u0022equipmentType\u0022: \u0022HVAC\u0022\n    }\n  ],\n  \u0022nextCursor\u0022: \u0022cDE6NDEy\u0022,\n  \u0022hasMore\u0022: true\n}\n\u0060\u0060\u0060\n\n- **Paging** works like the change feed: \u0060limit\u0060 is 1\u2013500 (100 by default), and while \u0060hasMore\u0060 is\n  \u0060true\u0060 you call again with \u0060cursor\u0060 set to the \u0060nextCursor\u0060 you just received. On the last page\n  \u0060nextCursor\u0060 is \u0060null\u0060. The cursor is opaque \u2014 store it verbatim, and do not reuse a cursor from\n  the change feed here (it answers \u0060422\u0060).\n- **Filters.** \u0060equipmentType\u0060 keeps the problems of one equipment type, matched on the type\u0027s exact\n  name, case-insensitively. \u0060search\u0060 keeps the problems whose name or code contains the text you\n  pass, case-insensitively. Both may be combined.\n- The catalogue changes rarely, so the usual pattern is to walk it once, cache it on your side and\n  refresh it on a schedule \u2014 not on every work order.\n\n## Errors\n\nEvery error response is a [\u0060ProblemDetails\u0060](https://www.rfc-editor.org/rfc/rfc9457) body with the\ncontent type \u0060application/problem\u002Bjson\u0060:\n\n\u0060\u0060\u0060json\n{\n  \u0022title\u0022: \u0022Unauthorized\u0022,\n  \u0022detail\u0022: \u0022A valid API key is required.\u0022,\n  \u0022status\u0022: 401\n}\n\u0060\u0060\u0060\n\n| Status | When | What to do |\n| --- | --- | --- |\n| \u0060401 Unauthorized\u0060 | The \u0060X-Api-Key\u0060 header is missing, empty, unknown or revoked \u2014 or a JWT was sent instead of a key. | Fix the credential. Do not retry with the same key. |\n| \u0060404 Not Found\u0060 | The addressed resource does not exist **or** belongs to another manufacturer \u2014 the two cases are deliberately indistinguishable. | Check the identifier; do not treat it as \u0022exists but forbidden\u0022. |\n| \u0060422 Unprocessable Entity\u0060 | The request body or query failed validation. \u0060errors\u0060 carries the per-field messages. | Fix the payload; retrying unchanged will fail again. |\n| \u0060429 Too Many Requests\u0060 | The per-key rate limit is exhausted. | Wait \u0060Retry-After\u0060 seconds, then retry. |\n| \u0060400 Bad Request\u0060 | The request could not be parsed or bound at all (malformed JSON, wrong parameter type). | Fix the request. |\n| \u0060409 Conflict\u0060 | A write collided with the current state of the data. | Re-read the resource and decide. |\n\n\u00605xx\u0060 responses are our fault. They are safe to retry with backoff for idempotent requests\n(\u0060GET\u0060); report them if they persist.\n\n## Rate limits\n\nRequests are counted **per key** in a one-minute sliding window; the default allowance is **120\nrequests per minute**. Over the limit the API answers \u0060429\u0060 with a \u0060Retry-After\u0060 header in seconds\nand no side effects. The limit protects the shared service, so poll on a schedule rather than in a\ntight loop, and keep one key per system so one noisy job cannot starve another.\n\n## Versioning policy\n\nThe major version lives in the path (\u0060/manufacturer-api/v1/...\u0060) and \u0060info.version\u0060 carries the\npublished document version.\n\nWithin \u0060v1\u0060 we only make **additive** changes, and your client must tolerate them:\n\n- new endpoints, new optional request fields, new response fields;\n- new values in an existing enumeration;\n- new \u00604xx\u0060 reasons for input we already rejected.\n\nA **breaking** change \u2014 removing or renaming a path, operation, parameter or response field,\nnarrowing a type, dropping an enumeration value, or making an existing input required \u2014 is never\nshipped inside \u0060v1\u0060. It goes to \u0060/manufacturer-api/v2\u0060, which is announced before it is released and\nruns alongside \u0060v1\u0060.\n\nThis is enforced on our side, not promised in prose: release \u00601.0.0\u0060 of this document is frozen as a\ncompatibility baseline, and our build compares every later document against it. A change that\nremoves or narrows anything, or makes an input required, fails the build before it can be released.\n\nPractical client rules: ignore unknown response fields, treat unknown enumeration values as\n\u0022unmapped\u0022 instead of failing, and never depend on property order or on the exact wording of\n\u0060title\u0060/\u0060detail\u0060.\n\n## Changelog\n\n### 1.0.0 \u2014 2026-10-11 \u2014 initial release\n\nThe first released version of the contract, and the compatibility baseline of \u0060v1\u0060. Its whole\nsurface:\n\n- **Authentication and limits** \u2014 \u0060X-Api-Key\u0060 on every call, \u0060ProblemDetails\u0060 errors, a per-key rate\n  limit answering \u0060429\u0060 with \u0060Retry-After\u0060; see [Authentication](#authentication),\n  [Errors](#errors) and [Rate limits](#rate-limits).\n- \u0060GET /manufacturer-api/v1/key\u0060 \u2014 verify a key and read the manufacturer it is bound to.\n- \u0060POST /manufacturer-api/v1/work-orders\u0060 \u2014 create a work order. \u0060externalReference\u0060,\n  \u0060customer.reference\u0060, \u0060serviceLocation.reference\u0060 and \u0060description\u0060 are required; \u0060problemId\u0060 is\n  optional and classifies the fault from the problem catalogue. Resolution is key first, then data,\n  so a registered key needs nothing else (see\n  [Which fields are needed when](#which-fields-are-needed-when)). Idempotent on\n  \u0060externalReference\u0060: a repeat answers \u0060200\u0060 with the same, unchanged work order and\n  \u0060Idempotent-Replayed: true\u0060.\n- \u0060GET /manufacturer-api/v1/work-orders/{id}\u0060 and\n  \u0060GET /manufacturer-api/v1/work-orders/by-reference/{externalReference}\u0060 \u2014 read one work order;\n  unknown, another manufacturer\u0027s and out-of-scope all answer \u0060404\u0060.\n- \u0060GET /manufacturer-api/v1/work-orders?ids=\u2026\u0026references=\u2026\u0060 \u2014 read up to 100 at once \u2192\n  \u0060{ items, notFound }\u0060.\n- \u0060GET /manufacturer-api/v1/work-orders/changes\u0060 \u2014 the change feed with an opaque cursor \u2192\n  \u0060{ items, nextCursor, hasMore }\u0060; see [Tracking status](#tracking-status). Items are full\n  work-order resources, so each one carries \u0060problem\u0060 and \u0060serviceLocation.reference\u0060; a problem\n  changed by a dispatcher puts the work order on the feed, exactly like a status change.\n- Reads see archived work orders too (\u0060archivedAt\u0060 is set on them).\n- \u0060POST /manufacturer-api/v1/customers\u0060 and \u0060GET /manufacturer-api/v1/customers/{reference}\u0060 \u2014\n  register an end customer under your own key, and read it back.\n- \u0060POST /manufacturer-api/v1/service-locations\u0060 and\n  \u0060GET /manufacturer-api/v1/service-locations/{reference}\u0060 \u2014 the same for that customer\u0027s sites.\n- \u0060POST /manufacturer-api/v1/equipment\u0060 and\n  \u0060GET /manufacturer-api/v1/equipment?serialNumber=\u2026\u0060 \u2014 register one of your units at a registered\n  site, keyed by its serial number, and look your units up by serial number. A serial number already\n  known at another site answers \u0060409\u0060.\n- All three registrations find-or-create only \u2014 no update, no delete, no listing \u2014 and are\n  idempotent on your key (\u0060200\u0060 \u002B \u0060Idempotent-Replayed: true\u0060 on a repeat); see\n  [Registering your directory](#registering-your-directory).\n- \u0060GET /manufacturer-api/v1/problems\u0060 \u2014 the read-only problem catalogue, paged like the change feed \u2192\n  \u0060{ items, nextCursor, hasMore }\u0060, filterable by \u0060equipmentType\u0060 and \u0060search\u0060; see\n  [Problem catalog](#problem-catalog).\n\nThe \u00601.0.0-preview\u0060, \u00601.1.0-preview\u0060 and \u00601.2.0-preview\u0060 documents published while the API was being\nbuilt are superseded by this release. Nothing that was in them was removed or narrowed. No earlier\n\u00601.0.0\u0060 document was released to partners: this entry describes the only \u00601.0.0\u0060 there has ever\nbeen.\n",
     "version": "1.0.0"
   },
   "paths": {
+    "/manufacturer-api/v1/customers": {
+      "post": {
+        "tags": [
+          "Directory"
+        ],
+        "summary": "Register a customer",
+        "description": "Registers one of your end customers in FixFlow under **your own** \u0060reference\u0060 \u2014 the customer\u0027s id in your system \u2014 so later work orders can address it by that key alone.\n\n\u0060reference\u0060 is the idempotency key: the first call answers \u0060201 Created\u0060 with a \u0060Location\u0060 header, and every later call with the same value answers \u0060200 OK\u0060 with the **same, unchanged** customer plus the response header \u0060Idempotent-Replayed: true\u0060. The body of a repeat is ignored entirely \u2014 registration never updates a stored row, because the directory belongs to the service company. Two calls that race each other still produce one mapping.\n\n**Matching.** With \u0060address\u0060 we look for an existing customer with the same name **and** the same \u0060addressLine1\u0060 \u002B ZIP \u2014 either the customer\u0027s own address or the address of one of its sites \u2014 and map your key onto it; otherwise a new customer is created from what you sent. Without \u0060address\u0060 nothing is matched and a new customer is always created: a name alone is never enough, since two unrelated companies may share one.\n\nThere is no update, delete or list here: a registered key is read back one at a time.",
+        "operationId": "registerCustomer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManufacturerApiCustomerRegisterRequest"
+              },
+              "example": {
+                "reference": "CUST-99812",
+                "name": "Riverside Dental",
+                "address": {
+                  "addressLine1": "125 West State Street",
+                  "addressLine2": "Suite 3",
+                  "city": "Trenton",
+                  "state": "NJ",
+                  "zip": "08608"
+                },
+                "phone": "\u002B1 609 555 0142"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiCustomer"
+                },
+                "example": {
+                  "id": 318,
+                  "reference": "CUST-99812",
+                  "name": "Riverside Dental"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiCustomer"
+                },
+                "example": {
+                  "id": 318,
+                  "reference": "CUST-99812",
+                  "name": "Riverside Dental"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Unauthorized",
+                  "detail": "A valid API key is required.",
+                  "status": 401
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "reference": [
+                      "A customer reference (the customer\u0027s id in your system) is required."
+                    ],
+                    "address.zip": [
+                      "ZIP is required when an address is sent."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Too many requests",
+                  "detail": "The API key has exceeded its request limit. Please retry later.",
+                  "status": 429
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "# customer.json holds the request body shown above.\ncurl -X POST \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/customers\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022 \\\n  -H \u0022Content-Type: application/json\u0022 \\\n  --data @customer.json\n\n# A repeat with the same reference is safe: it returns the same\n# customer (200, header Idempotent-Replayed: true)."
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/customers/{reference}": {
+      "get": {
+        "tags": [
+          "Directory"
+        ],
+        "summary": "Read one customer by your own reference",
+        "description": "Returns the customer your \u0060reference\u0060 is mapped to, so you never have to store FixFlow ids.\n\nThe scope is your own mappings only: a reference you never registered, and the same value registered by another manufacturer, both answer the same \u0060404\u0060 \u2014 the API never confirms that a directory row exists.\n\nThe resource is deliberately minimal (\u0060id\u0060, \u0060reference\u0060, \u0060name\u0060). Phone, email and the customer\u0027s own address stay inside FixFlow.",
+        "operationId": "getCustomer",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "The customer\u0027s id in your system, as you registered it (URL-encoded).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiCustomer"
+                },
+                "example": {
+                  "id": 318,
+                  "reference": "CUST-99812",
+                  "name": "Riverside Dental"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Not found",
+                  "detail": "No such customer.",
+                  "status": 404
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/customers/CUST-99812\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/equipment": {
+      "post": {
+        "tags": [
+          "Directory"
+        ],
+        "summary": "Register a unit by its serial number",
+        "description": "Registers one of **your own** units at a site you have already registered, so later work orders can name the unit by its serial number alone.\n\n\u0060serviceLocationReference\u0060 must already be registered by you (\u0060POST /service-locations\u0060), otherwise the call answers \u0060422\u0060 on that field.\n\n\u0060serialNumber\u0060 is **required** here \u2014 it is the unit\u0027s key, the way \u0060reference\u0060 is a customer\u0027s. The serial number is the idempotency key, together with the site:\n\n- no unit of yours carries it yet \u2192 the unit is created under **your** brand and the call answers \u0060201 Created\u0060 with a \u0060Location\u0060 header pointing at the lookup below;\n- one of your units at **that same site** already carries it \u2192 \u0060200 OK\u0060 with the **same, unchanged** unit plus \u0060Idempotent-Replayed: true\u0060. The body of a repeat is ignored entirely: registration never updates a stored unit;\n- one of your units at a **different** site carries it \u2192 \u0060409 Conflict\u0060, and nothing is changed. We never move a unit between sites \u2014 ask the dispatcher.\n\nMatching only ever looks at units of your own brand: equipment of another brand is never matched, changed or reported, even when it carries the very same serial number.\n\nIf \u0060modelNumber\u0060 is in your model catalogue in FixFlow the unit is linked to that model; an unknown model number is kept as free text, so nothing is rejected over it. \u0060name\u0060 is what a dispatcher sees in lists; omit it and the model number is used.",
+        "operationId": "registerEquipment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManufacturerApiEquipmentRegisterRequest"
+              },
+              "example": {
+                "serviceLocationReference": "SITE-4471",
+                "serialNumber": "SN-77421",
+                "modelNumber": "AC-200",
+                "name": "Rooftop unit A"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiEquipment"
+                },
+                "example": {
+                  "id": 7741,
+                  "serialNumber": "SN-77421",
+                  "modelNumber": "AC-200",
+                  "name": "Rooftop unit A",
+                  "serviceLocation": {
+                    "id": 904,
+                    "reference": "SITE-4471"
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiEquipment"
+                },
+                "example": {
+                  "id": 7741,
+                  "serialNumber": "SN-77421",
+                  "modelNumber": "AC-200",
+                  "name": "Rooftop unit A",
+                  "serviceLocation": {
+                    "id": 904,
+                    "reference": "SITE-4471"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Unauthorized",
+                  "detail": "A valid API key is required.",
+                  "status": 401
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Serial number already registered elsewhere",
+                  "detail": "This serial number is already registered at another service location.",
+                  "status": 409
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "serviceLocationReference": [
+                      "No service location of yours is registered under this reference. Register the site first with POST /manufacturer-api/v1/service-locations."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Too many requests",
+                  "detail": "The API key has exceeded its request limit. Please retry later.",
+                  "status": 429
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "# equipment.json holds the request body shown above.\ncurl -X POST \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/equipment\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022 \\\n  -H \u0022Content-Type: application/json\u0022 \\\n  --data @equipment.json\n\n# A repeat for the same serial number at the same site is safe: it\n# returns the same unit (200, header Idempotent-Replayed: true)."
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Directory"
+        ],
+        "summary": "Look units up by serial number",
+        "description": "Returns your units carrying this serial number, as \u0060{ items }\u0060, so you never have to store FixFlow ids.\n\nThe scope is your own brand: equipment of another brand with the same serial number is never returned. Normally there is exactly one item; several mean historical duplicates in the directory, which a dispatcher can merge. An unknown serial number is an empty \u0060items\u0060, not a \u0060404\u0060.\n\nComparison ignores letter case and extra spaces. \u0060serviceLocation.reference\u0060 is **your** key for that site, or \u0060null\u0060 if you never registered one for it \u2014 which happens when the unit was created by a work order or by a dispatcher.\n\n\u0060serialNumber\u0060 is required; without it the call answers \u0060422\u0060 on that parameter.",
+        "operationId": "getEquipmentBySerialNumber",
+        "parameters": [
+          {
+            "name": "serialNumber",
+            "in": "query",
+            "description": "The unit\u0027s serial number, exactly as it is stamped on the unit.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiEquipmentList"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": 7741,
+                      "serialNumber": "SN-77421",
+                      "modelNumber": "AC-200",
+                      "name": "Rooftop unit A",
+                      "serviceLocation": {
+                        "id": 904,
+                        "reference": "SITE-4471"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Unauthorized",
+                  "detail": "A valid API key is required.",
+                  "status": 401
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "serialNumber": [
+                      "A serial number is required."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Too many requests",
+                  "detail": "The API key has exceeded its request limit. Please retry later.",
+                  "status": 429
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/equipment?serialNumber=SN-77421\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
     "/manufacturer-api/v1/key": {
       "get": {
         "tags": [
@@ -82,7 +574,413 @@
           {
             "lang": "shell",
             "label": "curl",
-            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/key\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/key\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/problems": {
+      "get": {
+        "tags": [
+          "Problems"
+        ],
+        "summary": "Read the problem catalog",
+        "description": "Returns FixFlow\u0027s catalogue of problem codes, page by page, so you can send \u0060problemId\u0060 when you create a work order instead of describing the fault in free text only.\n\nThe catalogue belongs to the service company: it is **read-only** here, and the same entries are visible to every key \u2014 there is nothing manufacturer-specific about it. Internal accounting attributes (estimates, DNE limits, GL codes, CapEx flags) are never part of this response.\n\n**Paging.** Entries come back in a stable order, \u0060limit\u0060 per page (1\u2013500, 100 by default). While \u0060hasMore\u0060 is \u0060true\u0060, call again with \u0060cursor\u0060 set to the \u0060nextCursor\u0060 you just received; on the last page \u0060nextCursor\u0060 is \u0060null\u0060. The cursor is opaque \u2014 store it verbatim and make no assumptions about its contents.\n\n**Filters.** \u0060equipmentType\u0060 matches the equipment type\u0027s name exactly (case-insensitive); \u0060search\u0060 matches a substring of the problem\u0027s name or code (case-insensitive). The catalogue changes rarely, so the usual pattern is to walk it once and cache it, refreshing it on a schedule.",
+        "operationId": "getProblems",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The \u0060nextCursor\u0060 of your previous page, verbatim. Omit it to start from the beginning.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many catalogue entries one page may carry: 1\u2013500, 100 by default.",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "equipmentType",
+            "in": "query",
+            "description": "Keep only the problems of this equipment type (its exact name, case-insensitive).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Keep only the problems whose name or code contains this text (case-insensitive).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiProblemPage"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": 412,
+                      "name": "Unit does not cool",
+                      "code": "HVAC-COOL",
+                      "description": "No cooling at all, or the discharge air stays above setpoint.",
+                      "equipmentType": "HVAC"
+                    },
+                    {
+                      "id": 417,
+                      "name": "Water leak",
+                      "code": "HVAC-LEAK",
+                      "description": null,
+                      "equipmentType": "HVAC"
+                    }
+                  ],
+                  "nextCursor": "cDE6NDE3",
+                  "hasMore": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Unauthorized",
+                  "detail": "A valid API key is required.",
+                  "status": 401
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "cursor": [
+                      "The cursor is not valid. Read the catalogue from the first page again."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Too many requests",
+                  "detail": "The API key has exceeded its request limit. Please retry later.",
+                  "status": 429
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "# First page (100 entries by default).\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/problems?limit=100\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\n\n# Next page: pass the nextCursor you just received, verbatim.\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/problems?cursor=$CURSOR\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\n\n# Narrow the catalogue down to one equipment type, or search by name/code.\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/problems?equipmentType=HVAC\u0026search=leak\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/service-locations": {
+      "post": {
+        "tags": [
+          "Directory"
+        ],
+        "summary": "Register a service location",
+        "description": "Registers one of your customer\u0027s sites under **your own** \u0060reference\u0060 \u2014 the site\u0027s id in your system \u2014 so later work orders can address it by that key alone.\n\n\u0060customerReference\u0060 must already be registered by you (\u0060POST /customers\u0060), otherwise the call answers \u0060422\u0060 on that field: a site cannot exist without its customer, and we never reveal that a key belongs to somebody else.\n\n\u0060reference\u0060 is the idempotency key, exactly as for customers: the first call answers \u0060201 Created\u0060 with a \u0060Location\u0060 header, a repeat answers \u0060200 OK\u0060 with the **same, unchanged** site plus \u0060Idempotent-Replayed: true\u0060, and the body of a repeat is ignored entirely. Registration never updates a stored site.\n\n**Matching.** Among that customer\u0027s existing sites we look for the same \u0060addressLine1\u0060 \u002B ZIP (letter case and extra spaces ignored, ZIP compared on its first five digits, so \u006008608\u0060 and \u006008608-1234\u0060 are the same place) and map your key onto it; otherwise the site is created, named \u0060name\u0060 or \u2014 if you omit it \u2014 after the street line.\n\n**No site id in your system?** Use any key you can rebuild from your own data for the same site every time \u2014 for example the customer id plus the site number (\u0060CUST-99812/4\u0060). It never has to mean anything to FixFlow; it only has to be stable.",
+        "operationId": "registerServiceLocation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManufacturerApiServiceLocationRegisterRequest"
+              },
+              "example": {
+                "reference": "SITE-4471",
+                "customerReference": "CUST-99812",
+                "name": "Trenton clinic",
+                "addressLine1": "125 West State Street",
+                "addressLine2": "Suite 3",
+                "city": "Trenton",
+                "state": "NJ",
+                "zip": "08608",
+                "phone": "\u002B1 609 555 0150"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiServiceLocation"
+                },
+                "example": {
+                  "id": 904,
+                  "reference": "SITE-4471",
+                  "customer": {
+                    "id": 318,
+                    "reference": "CUST-99812",
+                    "name": "Riverside Dental"
+                  },
+                  "name": "Trenton clinic",
+                  "addressLine1": "125 West State Street",
+                  "addressLine2": "Suite 3",
+                  "city": "Trenton",
+                  "state": "NJ",
+                  "zip": "08608"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiServiceLocation"
+                },
+                "example": {
+                  "id": 904,
+                  "reference": "SITE-4471",
+                  "customer": {
+                    "id": 318,
+                    "reference": "CUST-99812",
+                    "name": "Riverside Dental"
+                  },
+                  "name": "Trenton clinic",
+                  "addressLine1": "125 West State Street",
+                  "addressLine2": "Suite 3",
+                  "city": "Trenton",
+                  "state": "NJ",
+                  "zip": "08608"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Unauthorized",
+                  "detail": "A valid API key is required.",
+                  "status": 401
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                },
+                "example": {
+                  "title": "Validation failed",
+                  "status": 422,
+                  "errors": {
+                    "customerReference": [
+                      "No customer of yours is registered under this reference. Register the customer first with POST /manufacturer-api/v1/customers."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Too many requests",
+                  "detail": "The API key has exceeded its request limit. Please retry later.",
+                  "status": 429
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "# service-location.json holds the request body shown above.\ncurl -X POST \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/service-locations\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022 \\\n  -H \u0022Content-Type: application/json\u0022 \\\n  --data @service-location.json\n\n# A repeat with the same reference is safe: it returns the same\n# site (200, header Idempotent-Replayed: true)."
+          }
+        ]
+      }
+    },
+    "/manufacturer-api/v1/service-locations/{reference}": {
+      "get": {
+        "tags": [
+          "Directory"
+        ],
+        "summary": "Read one service location by your own reference",
+        "description": "Returns the site your \u0060reference\u0060 is mapped to, together with the customer it belongs to, so you never have to store FixFlow ids.\n\n\u0060customer.reference\u0060 is **your** key for that customer, or \u0060null\u0060 if you never registered one for it.\n\nThe scope is your own mappings only: a reference you never registered, and the same value registered by another manufacturer, both answer the same \u0060404\u0060.",
+        "operationId": "getServiceLocation",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "The site\u0027s id in your system, as you registered it (URL-encoded).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManufacturerApiServiceLocation"
+                },
+                "example": {
+                  "id": 904,
+                  "reference": "SITE-4471",
+                  "customer": {
+                    "id": 318,
+                    "reference": "CUST-99812",
+                    "name": "Riverside Dental"
+                  },
+                  "name": "Trenton clinic",
+                  "addressLine1": "125 West State Street",
+                  "addressLine2": "Suite 3",
+                  "city": "Trenton",
+                  "state": "NJ",
+                  "zip": "08608"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                },
+                "example": {
+                  "title": "Not found",
+                  "detail": "No such service location.",
+                  "status": 404
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "shell",
+            "label": "curl",
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/service-locations/SITE-4471\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
           }
         ]
       }
@@ -93,7 +991,7 @@
           "Work orders"
         ],
         "summary": "Create a work order",
-        "description": "Submits a repair request for one of your units at an end customer\u0027s site. FixFlow matches or creates the customer, the service location and the unit itself, then opens the work order in status \u0060New\u0060 for a dispatcher to triage.\n\n\u0060externalReference\u0060 \u2014 your own claim or case number \u2014 is the idempotency key: the first call creates the work order (\u0060201\u0060), every later call with the same value returns that same work order unchanged (\u0060200\u0060 with the \u0060Idempotent-Replayed: true\u0060 header). Retrying a timed-out request is therefore always safe.\n\nThe unit always belongs to the manufacturer the key is bound to, so the work order shows up in your scope by construction; equipment of another brand is never matched or modified.",
+        "description": "Submits a repair request for one of your units at an end customer\u0027s site. FixFlow matches or creates the customer, the service location and the unit itself, then opens the work order in status \u0060New\u0060 for a dispatcher to triage.\n\n**Address the customer and the site with your own keys.** \u0060customer.reference\u0060 (the customer\u0027s id in your system) and \u0060serviceLocation.reference\u0060 (the site\u0027s id) are both required, and resolution is key first: a key we have already seen leads to the very same directory row every time \u2014 even if the name or address in this request differs \u2014 and that row is never overwritten from a request. The other customer and address fields are needed only while a key is still unknown to us: \u0060customer.name\u0060 for a new customer key, \u0060addressLine1\u0060, \u0060city\u0060, \u0060state\u0060 and \u0060zip\u0060 for a new site key, and \u0060equipment.modelNumber\u0060 only when no unit of yours with that serial number is found at the site. A mapped site that belongs to a different customer answers \u0060422\u0060.\n\n\u0060externalReference\u0060 \u2014 your own claim or case number \u2014 is the idempotency key: the first call creates the work order (\u0060201\u0060), every later call with the same value returns that same work order unchanged (\u0060200\u0060 with the \u0060Idempotent-Replayed: true\u0060 header). Retrying a timed-out request is therefore always safe.\n\nThe unit always belongs to the manufacturer the key is bound to, so the work order shows up in your scope by construction; equipment of another brand is never matched or modified.",
         "operationId": "createWorkOrder",
         "requestBody": {
           "content": {
@@ -110,6 +1008,7 @@
                   "email": "office@riverside-dental.example"
                 },
                 "serviceLocation": {
+                  "reference": "SITE-4471",
                   "addressLine1": "125 West State Street",
                   "addressLine2": "Suite 3",
                   "city": "Trenton",
@@ -120,6 +1019,7 @@
                   "modelNumber": "AC-200",
                   "serialNumber": "SN-77421"
                 },
+                "problemId": 412,
                 "description": "Unit shuts down after 10 minutes and reports error E-14.",
                 "urgency": "Normal",
                 "isWarranty": true,
@@ -157,6 +1057,7 @@
                   "serviceLocation": {
                     "id": 904,
                     "name": "125 West State Street",
+                    "reference": "SITE-4471",
                     "addressLine1": "125 West State Street",
                     "addressLine2": "Suite 3",
                     "city": "Trenton",
@@ -167,6 +1068,10 @@
                     "id": 5521,
                     "serialNumber": "SN-77421",
                     "modelNumber": "AC-200"
+                  },
+                  "problem": {
+                    "id": 412,
+                    "name": "Unit does not cool"
                   },
                   "description": "Unit shuts down after 10 minutes and reports error E-14.",
                   "isWarranty": true,
@@ -207,6 +1112,7 @@
                   "serviceLocation": {
                     "id": 904,
                     "name": "125 West State Street",
+                    "reference": "SITE-4471",
                     "addressLine1": "125 West State Street",
                     "addressLine2": "Suite 3",
                     "city": "Trenton",
@@ -217,6 +1123,10 @@
                     "id": 5521,
                     "serialNumber": "SN-77421",
                     "modelNumber": "AC-200"
+                  },
+                  "problem": {
+                    "id": 412,
+                    "name": "Unit does not cool"
                   },
                   "description": "Unit shuts down after 10 minutes and reports error E-14.",
                   "isWarranty": true,
@@ -285,11 +1195,11 @@
                     "externalReference": [
                       "An external reference is required."
                     ],
-                    "serviceLocation.zip": [
-                      "ZIP is required."
+                    "customer.reference": [
+                      "A customer reference (the customer\u0027s id in your system) is required."
                     ],
-                    "equipment.modelNumber": [
-                      "Model number is required."
+                    "serviceLocation.reference": [
+                      "A service-location reference (the site\u0027s id in your system) is required."
                     ]
                   }
                 }
@@ -316,7 +1226,7 @@
           {
             "lang": "shell",
             "label": "curl",
-            "source": "# work-order.json holds the request body shown above.\r\ncurl -X POST \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022 \\\r\n  -H \u0022Content-Type: application/json\u0022 \\\r\n  --data @work-order.json\r\n\r\n# A retry with the same externalReference is safe: it returns\r\n# the same work order (200, header Idempotent-Replayed: true)."
+            "source": "# work-order.json holds the request body shown above.\ncurl -X POST \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022 \\\n  -H \u0022Content-Type: application/json\u0022 \\\n  --data @work-order.json\n\n# A retry with the same externalReference is safe: it returns\n# the same work order (200, header Idempotent-Replayed: true)."
           }
         ]
       },
@@ -375,6 +1285,7 @@
                       "serviceLocation": {
                         "id": 904,
                         "name": "125 West State Street",
+                        "reference": "SITE-4471",
                         "addressLine1": "125 West State Street",
                         "addressLine2": "Suite 3",
                         "city": "Trenton",
@@ -385,6 +1296,10 @@
                         "id": 5521,
                         "serialNumber": "SN-77421",
                         "modelNumber": "AC-200"
+                      },
+                      "problem": {
+                        "id": 412,
+                        "name": "Unit does not cool"
                       },
                       "description": "Unit shuts down after 10 minutes and reports error E-14.",
                       "isWarranty": true,
@@ -468,7 +1383,7 @@
           {
             "lang": "shell",
             "label": "curl",
-            "source": "# Up to 100 ids and references in total.\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders?ids=10427,10431\u0026references=CLM-2026-55120\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+            "source": "# Up to 100 ids and references in total.\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders?ids=10427,10431\u0026references=CLM-2026-55120\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
           }
         ]
       }
@@ -516,6 +1431,7 @@
                   "serviceLocation": {
                     "id": 904,
                     "name": "125 West State Street",
+                    "reference": "SITE-4471",
                     "addressLine1": "125 West State Street",
                     "addressLine2": "Suite 3",
                     "city": "Trenton",
@@ -526,6 +1442,10 @@
                     "id": 5521,
                     "serialNumber": "SN-77421",
                     "modelNumber": "AC-200"
+                  },
+                  "problem": {
+                    "id": 412,
+                    "name": "Unit does not cool"
                   },
                   "description": "Unit shuts down after 10 minutes and reports error E-14.",
                   "isWarranty": true,
@@ -595,7 +1515,7 @@
           {
             "lang": "shell",
             "label": "curl",
-            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/10427\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/10427\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
           }
         ]
       }
@@ -641,6 +1561,7 @@
                   "serviceLocation": {
                     "id": 904,
                     "name": "125 West State Street",
+                    "reference": "SITE-4471",
                     "addressLine1": "125 West State Street",
                     "addressLine2": "Suite 3",
                     "city": "Trenton",
@@ -651,6 +1572,10 @@
                     "id": 5521,
                     "serialNumber": "SN-77421",
                     "modelNumber": "AC-200"
+                  },
+                  "problem": {
+                    "id": 412,
+                    "name": "Unit does not cool"
                   },
                   "description": "Unit shuts down after 10 minutes and reports error E-14.",
                   "isWarranty": true,
@@ -720,7 +1645,7 @@
           {
             "lang": "shell",
             "label": "curl",
-            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/by-reference/CLM-2026-55120\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+            "source": "curl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/by-reference/CLM-2026-55120\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
           }
         ]
       }
@@ -788,6 +1713,7 @@
                       "serviceLocation": {
                         "id": 904,
                         "name": "125 West State Street",
+                        "reference": "SITE-4471",
                         "addressLine1": "125 West State Street",
                         "addressLine2": "Suite 3",
                         "city": "Trenton",
@@ -798,6 +1724,10 @@
                         "id": 5521,
                         "serialNumber": "SN-77421",
                         "modelNumber": "AC-200"
+                      },
+                      "problem": {
+                        "id": 412,
+                        "name": "Unit does not cool"
                       },
                       "description": "Unit shuts down after 10 minutes and reports error E-14.",
                       "isWarranty": true,
@@ -876,7 +1806,7 @@
           {
             "lang": "shell",
             "label": "curl",
-            "source": "# 1. Subscribe from now: no items, just the current nextCursor. Store it.\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\r\n\r\n# 2. Every 30-60 s: pass the last nextCursor verbatim and store the new one.\r\n#    While hasMore is true, call again straight away.\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes?cursor=$CURSOR\u0026limit=100\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\r\n\r\n# Backfill from a moment in time instead of a cursor:\r\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes?since=2026-10-01T00:00:00Z\u0022 \\\r\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
+            "source": "# 1. Subscribe from now: no items, just the current nextCursor. Store it.\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\n\n# 2. Every 30-60 s: pass the last nextCursor verbatim and store the new one.\n#    While hasMore is true, call again straight away.\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes?cursor=$CURSOR\u0026limit=100\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022\n\n# Backfill from a moment in time instead of a cursor:\ncurl \u0022https://\u003Cyour-fixflow-host\u003E/fixflow/manufacturer-api/v1/work-orders/changes?since=2026-10-01T00:00:00Z\u0022 \\\n  -H \u0022X-Api-Key: $FIXFLOW_API_KEY\u0022"
           }
         ]
       }
@@ -884,19 +1814,84 @@
   },
   "components": {
     "schemas": {
-      "ManufacturerApiCustomerInput": {
+      "ManufacturerApiAddressInput": {
         "required": [
-          "name"
+          "addressLine1",
+          "city",
+          "state",
+          "zip"
         ],
         "type": "object",
         "properties": {
-          "name": {
+          "addressLine1": {
             "type": [
               "null",
               "string"
             ]
           },
+          "city": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "zip": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "addressLine2": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiCustomer": {
+        "required": [
+          "id",
+          "reference",
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
           "reference": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ManufacturerApiCustomerInput": {
+        "required": [
+          "reference"
+        ],
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
             "type": [
               "null",
               "string"
@@ -916,10 +1911,82 @@
           }
         }
       },
-      "ManufacturerApiEquipmentInput": {
+      "ManufacturerApiCustomerRegisterRequest": {
         "required": [
-          "modelNumber"
+          "reference",
+          "name"
         ],
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "address": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiAddressInput"
+              }
+            ]
+          },
+          "phone": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiEquipment": {
+        "required": [
+          "id",
+          "serialNumber",
+          "modelNumber",
+          "name",
+          "serviceLocation"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "serialNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "modelNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "serviceLocation": {
+            "$ref": "#/components/schemas/ManufacturerApiEquipmentServiceLocation"
+          }
+        }
+      },
+      "ManufacturerApiEquipmentInput": {
         "type": "object",
         "properties": {
           "modelNumber": {
@@ -935,6 +2002,77 @@
             ]
           },
           "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiEquipmentList": {
+        "required": [
+          "items"
+        ],
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManufacturerApiEquipment"
+            }
+          }
+        }
+      },
+      "ManufacturerApiEquipmentRegisterRequest": {
+        "required": [
+          "serviceLocationReference",
+          "serialNumber",
+          "modelNumber"
+        ],
+        "type": "object",
+        "properties": {
+          "serviceLocationReference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "serialNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "modelNumber": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiEquipmentServiceLocation": {
+        "required": [
+          "id",
+          "reference"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "reference": {
             "type": [
               "null",
               "string"
@@ -1022,8 +2160,222 @@
           }
         }
       },
+      "ManufacturerApiProblem": {
+        "required": [
+          "id",
+          "name",
+          "code",
+          "description",
+          "equipmentType"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "code": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "description": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "equipmentType": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiProblemPage": {
+        "required": [
+          "items",
+          "nextCursor",
+          "hasMore"
+        ],
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManufacturerApiProblem"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ManufacturerApiServiceLocation": {
+        "required": [
+          "id",
+          "reference",
+          "customer",
+          "name",
+          "addressLine1",
+          "addressLine2",
+          "city",
+          "state",
+          "zip"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "customer": {
+            "$ref": "#/components/schemas/ManufacturerApiServiceLocationCustomer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "addressLine1": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "addressLine2": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "city": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "zip": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiServiceLocationCustomer": {
+        "required": [
+          "id",
+          "reference",
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "ManufacturerApiServiceLocationInput": {
         "required": [
+          "reference"
+        ],
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "addressLine1": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "city": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "zip": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "addressLine2": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phone": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ManufacturerApiServiceLocationRegisterRequest": {
+        "required": [
+          "reference",
+          "customerReference",
           "addressLine1",
           "city",
           "state",
@@ -1031,6 +2383,18 @@
         ],
         "type": "object",
         "properties": {
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "customerReference": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
           "addressLine1": {
             "type": [
               "null",
@@ -1085,6 +2449,7 @@
           "customer",
           "serviceLocation",
           "equipment",
+          "problem",
           "description",
           "isWarranty",
           "warrantyNumber",
@@ -1145,6 +2510,16 @@
               },
               {
                 "$ref": "#/components/schemas/ManufacturerApiWorkOrderEquipment"
+              }
+            ]
+          },
+          "problem": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiWorkOrderProblem"
               }
             ]
           },
@@ -1310,6 +2685,16 @@
               },
               {
                 "$ref": "#/components/schemas/ManufacturerApiWorkOrderEquipment"
+              }
+            ]
+          },
+          "problem": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManufacturerApiWorkOrderProblem"
               }
             ]
           },
@@ -1517,6 +2902,15 @@
                 "$ref": "#/components/schemas/ManufacturerApiOnSiteContactInput"
               }
             ]
+          },
+          "problemId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -1603,10 +2997,31 @@
           }
         }
       },
+      "ManufacturerApiWorkOrderProblem": {
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "ManufacturerApiWorkOrderServiceLocation": {
         "required": [
           "id",
           "name",
+          "reference",
           "addressLine1",
           "addressLine2",
           "city",
@@ -1625,6 +3040,12 @@
           },
           "name": {
             "type": "string"
+          },
+          "reference": {
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "addressLine1": {
             "type": [
@@ -1779,7 +3200,13 @@
   ],
   "tags": [
     {
+      "name": "Directory"
+    },
+    {
       "name": "Keys"
+    },
+    {
+      "name": "Problems"
     },
     {
       "name": "Work orders"

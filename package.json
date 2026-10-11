@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Reference client for the FixFlow Manufacturer API v1: create repair work orders and track their status by polling the change feed.",
+  "description": "Reference client for the FixFlow Manufacturer API v1: register your directory under your own keys, create repair work orders and track their status by polling the change feed.",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -14,7 +14,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "mock": "tsx src/mock/standalone.ts"
+    "mock": "tsx src/mock/standalone.ts",
+    "walkthrough": "tsx src/walkthrough.ts"
   },
   "dependencies": {
     "@fastify/static": "^10.1.6",

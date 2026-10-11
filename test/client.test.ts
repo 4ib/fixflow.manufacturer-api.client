@@ -1,9 +1,20 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { FixFlowApiError, FixFlowClient } from '../src/fixflow/client.js';
-import { sampleRequest, startHarness, type Harness } from './helpers.js';
+import { keysOnlyRequest, sampleRequest, startHarness, type Harness } from './helpers.js';
 
-describe('FixFlowClient against the mock', () => {
+/** Runs `call` and returns the FixFlowApiError it throws. */
+async function apiError(call: Promise<unknown>): Promise<FixFlowApiError> {
+  try {
+    await call;
+  } catch (error) {
+    assert.ok(error instanceof FixFlowApiError, `expected a FixFlowApiError, got ${String(error)}`);
+    return error;
+  }
+  assert.fail('expected the call to fail');
+}
+
+describe('the key', () => {
   let h: Harness;
   before(async () => {
     h = await startHarness();
@@ -18,20 +29,26 @@ describe('FixFlowClient against the mock', () => {
 
   it('rejects a wrong key with 401 problem details', async () => {
     const wrong = new FixFlowClient({ baseUrl: h.baseUrl, apiKey: 'ffmfr_wrong' });
-    await assert.rejects(wrong.verifyKey(), (error: unknown) => {
-      assert.ok(error instanceof FixFlowApiError);
-      assert.equal(error.status, 401);
-      assert.equal(error.problem.title, 'Unauthorized');
-      return true;
-    });
+    const error = await apiError(wrong.verifyKey());
+    assert.equal(error.status, 401);
+    assert.equal(error.problem.title, 'Unauthorized');
   });
+});
+
+describe('work orders addressed by your keys', () => {
+  let h: Harness;
+  before(async () => {
+    h = await startHarness();
+  });
+  after(() => h.close());
 
   it('creates a work order once and replays it for the same externalReference', async () => {
     const request = sampleRequest();
     const first = await h.client.createWorkOrder(request);
     assert.equal(first.replayed, false);
     assert.equal(first.workOrder.status, 'New');
-    assert.equal(first.workOrder.externalReference, request.externalReference);
+    assert.equal(first.workOrder.customer.reference, 'CUST-99812');
+    assert.equal(first.workOrder.serviceLocation?.reference, 'SITE-4471');
 
     const again = await h.client.createWorkOrder({ ...request, description: 'changed text is ignored' });
     assert.equal(again.replayed, true);
@@ -39,18 +56,65 @@ describe('FixFlowClient against the mock', () => {
     assert.equal(again.workOrder.description, request.description);
   });
 
-  it('returns 422 field errors keyed by JSON path', async () => {
-    const invalid = sampleRequest({
-      customer: { name: '' },
-      serviceLocation: { addressLine1: 'x', city: 'Trenton', state: 'NJ', zip: '' },
-      urgency: 'Whenever' as never,
-    });
-    await assert.rejects(h.client.createWorkOrder(invalid), (error: unknown) => {
-      assert.ok(error instanceof FixFlowApiError);
-      assert.equal(error.status, 422);
-      assert.deepEqual(Object.keys(error.fieldErrors).sort(), ['customer.name', 'serviceLocation.zip', 'urgency']);
-      return true;
-    });
+  it('always needs both keys, the claim number and a description', async () => {
+    const error = await apiError(h.client.createWorkOrder({} as never));
+    assert.equal(error.status, 422);
+    assert.deepEqual(Object.keys(error.fieldErrors).sort(), [
+      'customer.reference',
+      'description',
+      'externalReference',
+      'serviceLocation.reference',
+    ]);
+  });
+
+  it('needs the name and the address only while a key is still unknown', async () => {
+    const error = await apiError(
+      h.client.createWorkOrder(keysOnlyRequest({ customer: { reference: 'NEW-C' }, serviceLocation: { reference: 'NEW-S' } })),
+    );
+    assert.equal(error.status, 422);
+    assert.deepEqual(Object.keys(error.fieldErrors).sort(), [
+      'customer.name',
+      'serviceLocation.addressLine1',
+      'serviceLocation.city',
+      'serviceLocation.state',
+      'serviceLocation.zip',
+    ]);
+  });
+
+  it('a known key leads to the same rows, whatever else the request says', async () => {
+    const first = (await h.client.createWorkOrder(sampleRequest())).workOrder;
+    const second = (await h.client.createWorkOrder(
+      keysOnlyRequest({ customer: { reference: 'CUST-99812', name: 'A different name' } }),
+    )).workOrder;
+    assert.equal(second.customer.id, first.customer.id);
+    assert.equal(second.customer.name, 'Riverside Dental', 'the stored customer is never overwritten');
+    assert.equal(second.serviceLocation?.id, first.serviceLocation?.id);
+    assert.equal(second.equipment?.id, first.equipment?.id, 'the serial number found the unit, no model needed');
+  });
+
+  it('rejects a known site of a different customer', async () => {
+    await h.client.createWorkOrder(sampleRequest());
+    const error = await apiError(h.client.createWorkOrder(sampleRequest({
+      customer: { reference: 'CUST-OTHER', name: 'Northside Clinic' },
+    })));
+    assert.equal(error.status, 422);
+    assert.deepEqual(Object.keys(error.fieldErrors), ['serviceLocation.reference']);
+  });
+
+  it('a new unit needs a model number', async () => {
+    const error = await apiError(h.client.createWorkOrder(keysOnlyRequest({ equipment: { serialNumber: 'SN-NEW' } })));
+    assert.equal(error.status, 422);
+    assert.deepEqual(Object.keys(error.fieldErrors), ['equipment.modelNumber']);
+  });
+
+  it('takes a catalogue problem and rejects an unknown one', async () => {
+    const [problem] = await h.client.getAllProblems({ search: 'not making ice' });
+    assert.ok(problem);
+    const { workOrder } = await h.client.createWorkOrder(sampleRequest({ problemId: problem.id }));
+    assert.deepEqual(workOrder.problem, { id: problem.id, name: problem.name });
+
+    const error = await apiError(h.client.createWorkOrder(sampleRequest({ problemId: 999_999 })));
+    assert.deepEqual(Object.keys(error.fieldErrors), ['problemId']);
   });
 
   it('reads one work order by id and by reference; unknown is null', async () => {
@@ -66,6 +130,134 @@ describe('FixFlowClient against the mock', () => {
     const batch = await h.client.getWorkOrders({ ids: [workOrder.id, 999_999], references: ['NO-SUCH-CLAIM'] });
     assert.deepEqual(batch.items.map((w) => w.id), [workOrder.id]);
     assert.deepEqual(batch.notFound, { ids: [999_999], references: ['NO-SUCH-CLAIM'] });
+  });
+});
+
+describe('registering your directory', () => {
+  const trenton = { addressLine1: '125 West State Street', city: 'Trenton', state: 'NJ', zip: '08608' };
+
+  it('registers a customer once; a repeat returns the stored row unchanged', async () => {
+    const h = await startHarness();
+    try {
+      const first = await h.client.registerCustomer({ reference: 'C-1', name: 'Riverside Dental' });
+      assert.equal(first.replayed, false);
+      const again = await h.client.registerCustomer({ reference: 'C-1', name: 'Renamed' });
+      assert.equal(again.replayed, true);
+      assert.deepEqual(again.resource, first.resource);
+      assert.deepEqual(await h.client.getCustomer('C-1'), first.resource);
+      assert.equal(await h.client.getCustomer('NOT-MINE'), null);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('finds a customer FixFlow already has by name WITH address, never by name alone', async () => {
+    const h = await startHarness({ seedDirectory: true });
+    try {
+      const matched = await h.client.registerCustomer({ reference: 'C-1', name: 'riverside  dental', address: trenton });
+      const seededSite = (await h.client.registerServiceLocation({ reference: 'S-1', customerReference: 'C-1', ...trenton })).resource;
+      assert.equal(seededSite.customer.id, matched.resource.id);
+      assert.equal(seededSite.name, 'Riverside Dental — Trenton', 'the existing site was found, not created');
+
+      const byNameOnly = await h.client.registerCustomer({ reference: 'C-2', name: 'Riverside Dental' });
+      assert.notEqual(byNameOnly.resource.id, matched.resource.id);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('a site needs a registered customer', async () => {
+    const h = await startHarness();
+    try {
+      const error = await apiError(h.client.registerServiceLocation({ reference: 'S-1', customerReference: 'NOPE', ...trenton }));
+      assert.equal(error.status, 422);
+      assert.deepEqual(Object.keys(error.fieldErrors), ['customerReference']);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('registers a unit by serial number; the same serial at another site is a 409', async () => {
+    const h = await startHarness();
+    try {
+      await h.client.registerCustomer({ reference: 'C-1', name: 'Riverside Dental' });
+      await h.client.registerServiceLocation({ reference: 'S-1', customerReference: 'C-1', ...trenton });
+      await h.client.registerServiceLocation({
+        reference: 'S-2', customerReference: 'C-1', addressLine1: '900 Market Street', city: 'Philadelphia', state: 'PA', zip: '19106',
+      });
+
+      const unit = await h.client.registerEquipment({ serviceLocationReference: 'S-1', serialNumber: 'SN-1', modelNumber: 'AC-200' });
+      assert.equal(unit.replayed, false);
+      assert.equal(unit.resource.serviceLocation.reference, 'S-1');
+      const again = await h.client.registerEquipment({ serviceLocationReference: 'S-1', serialNumber: 'sn-1', modelNumber: 'X' });
+      assert.equal(again.replayed, true);
+      assert.equal(again.resource.id, unit.resource.id);
+
+      const moved = await apiError(h.client.registerEquipment({ serviceLocationReference: 'S-2', serialNumber: 'SN-1', modelNumber: 'AC-200' }));
+      assert.equal(moved.status, 409);
+
+      const unknownSite = await apiError(h.client.registerEquipment({ serviceLocationReference: 'NOPE', serialNumber: 'SN-2', modelNumber: 'AC-200' }));
+      assert.deepEqual(Object.keys(unknownSite.fieldErrors), ['serviceLocationReference']);
+
+      assert.deepEqual((await h.client.findEquipment('SN-1')).map((u) => u.id), [unit.resource.id]);
+      assert.deepEqual(await h.client.findEquipment('NOTHING'), []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('the recommended flow: register once, then create work orders with the keys only', async () => {
+    const h = await startHarness();
+    try {
+      await h.client.registerCustomer({ reference: 'CUST-99812', name: 'Riverside Dental' });
+      const site = (await h.client.registerServiceLocation({ reference: 'SITE-4471', customerReference: 'CUST-99812', ...trenton })).resource;
+      const unit = (await h.client.registerEquipment({ serviceLocationReference: 'SITE-4471', serialNumber: 'SN-77421', modelNumber: 'AC-200' })).resource;
+
+      const { workOrder } = await h.client.createWorkOrder(keysOnlyRequest({ problemId: 107 }));
+      assert.equal(workOrder.serviceLocation?.id, site.id);
+      assert.equal(workOrder.equipment?.id, unit.id);
+      assert.equal(workOrder.problem?.name, 'Not cooling');
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('the problem catalogue', () => {
+  let h: Harness;
+  before(async () => {
+    h = await startHarness();
+  });
+  after(() => h.close());
+
+  it('pages through the whole catalogue without gaps or repeats', async () => {
+    const seen: number[] = [];
+    let cursor: string | undefined;
+    for (let pages = 0; ; pages++) {
+      assert.ok(pages < 10);
+      const page = await h.client.getProblems({ limit: 5, cursor });
+      seen.push(...page.items.map((p) => p.id));
+      if (!page.hasMore) {
+        assert.equal(page.nextCursor, null);
+        break;
+      }
+      cursor = page.nextCursor!;
+    }
+    assert.equal(new Set(seen).size, seen.length);
+    assert.deepEqual(seen, (await h.client.getAllProblems()).map((p) => p.id));
+  });
+
+  it('filters by equipment type and by name or code', async () => {
+    const ice = await h.client.getAllProblems({ equipmentType: 'ice machine' });
+    assert.ok(ice.length > 0);
+    assert.ok(ice.every((p) => p.equipmentType === 'Ice Machine'));
+    const ov = await h.client.getAllProblems({ search: 'ov' });
+    assert.ok(ov.every((p) => p.name.toLowerCase().includes('ov') || p.code?.toLowerCase().includes('ov')));
+  });
+
+  it('rejects a cursor it did not issue', async () => {
+    const error = await apiError(h.client.getProblems({ cursor: 'not-a-cursor' }));
+    assert.equal(error.status, 422);
   });
 });
 
@@ -137,11 +329,8 @@ describe('rate limiting', () => {
     const h = await startHarness({ rateLimitPerMinute: 1 });
     try {
       await h.client.verifyKey();
-      await assert.rejects(h.client.verifyKey(), (error: unknown) => {
-        assert.ok(error instanceof FixFlowApiError);
-        assert.equal(error.status, 429);
-        return true;
-      });
+      const error = await apiError(h.client.verifyKey());
+      assert.equal(error.status, 429);
     } finally {
       await h.close();
     }
